@@ -1,6 +1,6 @@
 import sys
 from math import log2
-from typing import Type
+from typing import Type, List
 
 class Model:
     def pvalue(self, v: int) -> float:
@@ -61,6 +61,26 @@ def entropy(content: bytes, model_type: Type[Model]) -> float:
 
     return e
 
+def popcnt(b: int) -> int:
+    assert b >= 0 and b < 256
+    n = 0
+    for _ in range(8):
+        bit = b & 1
+        if bit:
+            n += 1
+        
+    return n
+
+POPCNT_LUT = [popcnt(b) for b in range(256)]
+
+def bitwise_entropy(data: bytes) -> float:
+    total = 8 * len(data)
+    ones = 0
+    for b in data:
+        ones += POPCNT_LUT[b]
+
+    return sum(-p * log2(p) for p in [ones / total, (total - ones) / total])
+
 def main():
     filename = sys.argv[1]
     with open(filename, 'rb') as file:
@@ -79,7 +99,9 @@ def main():
         p = f / total
         e -= (p * log2(p)) if p > 0.0 else 0.0
 
-    print("Actual entropy:", e * l / 8)
+    print("Actual total entropy content:", e * l / 8)
+
+    print("Bitwise entropy:", bitwise_entropy(data))
 
     for mtype in [UniformModel, SimpleByteModel, SimpleMarkovModel]:
         print(f"{mtype.__name__}: {entropy(data, mtype) / 8}")
