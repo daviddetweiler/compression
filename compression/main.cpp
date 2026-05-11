@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -109,7 +110,6 @@ namespace compression {
 			std::vector<bit_model> weights;
 		};
 
-		constexpr auto ctx_mask = 0xfffull;
 		constexpr auto bitpos_mask = 63ull;
 
 		struct bitreader {
@@ -162,7 +162,7 @@ namespace compression {
 			return total;
 		}
 
-		model get_stats(gsl::span<const unsigned char> bytes)
+		model get_stats(gsl::span<const unsigned char> bytes, std::uint64_t ctx_mask)
 		{
 			bitreader rdr {bytes};
 			std::uint64_t window {};
@@ -184,7 +184,7 @@ namespace compression {
 			return {total, dist};
 		}
 
-		double running_entropy(gsl::span<const unsigned char> bytes)
+		double running_entropy(gsl::span<const unsigned char> bytes, std::uint64_t ctx_mask)
 		{
 			bitreader rdr {bytes};
 			std::uint64_t window {};
@@ -213,13 +213,90 @@ namespace compression {
 			return e_total;
 		}
 
+		double mixed_entropy(gsl::span<const unsigned char> bytes, gsl::span<const std::uint64_t> ctx_masks)
+		{
+			bitreader rdr {bytes};
+			std::uint64_t window {};
+			std::uint64_t total {};
+			std::vector<std::vector<bit_model>> dist_a(ctx_masks.size());
+			auto i = 0;
+			for (auto& dist : dist_a) {
+				const auto ctx_mask = gsl::at(ctx_masks, i);
+				dist.resize(1ull << _mm_popcnt_u64(ctx_mask));
+				for (auto& model : dist) {
+					model.total = 2;
+					model.ones = 1;
+				}
+
+				++i;
+			}
+
+			auto e_total = 0.0;
+			while (!rdr.is_end()) {
+				const auto bit = rdr.next();
+				auto pvalue = 0.0;
+				auto i = 0;
+				for (auto& dist : dist_a) {
+					const auto ctx_mask = gsl::at(ctx_masks, i);
+					const auto ctx = _pext_u64(window, ctx_mask);
+					auto& model = gsl::at(dist, ctx);
+					pvalue += static_cast<double>(model.ones) / model.total;
+					if (bit)
+						++model.ones;
+
+					++model.total;
+					++i;
+				}
+
+				pvalue /= dist_a.size();
+
+				e_total += contribution(pvalue) + contribution(1.0 - pvalue);
+				window <<= 1;
+				window |= bit;
+				++total;
+			}
+
+			return e_total;
+		}
+
 		class encoder {
+		public:
 		private:
 			std::uint64_t lbound {};
 			std::uint64_t rbound {~lbound};
 			std::uint64_t slider {}; // The sliding window
 			std::uint64_t bitpos {}; // Count of bits in use
+			std::vector<unsigned char> encoded {};
 		};
+
+		std::uint64_t evolve_for(gsl::span<const unsigned char> data)
+		{
+			std::vector<std::pair<std::uint64_t, double>> pool(256);
+			std::uint64_t k {};
+			for (auto& gene : pool)
+				gene.first = k;
+
+			const auto actual_bits = data.size() * 8;
+			for (auto i = 0; i < 100; ++i) {
+				for (auto& [ctx_mask, score] : pool)
+					score = running_entropy(data, ctx_mask) / actual_bits;
+
+				std::sort(pool.begin(), pool.end(), [](auto&& a, auto&& b) { return a.second < b.second; });
+				std::cout << "Generation " << i << " best score " << pool.front().second << std::endl;
+			}
+
+			return 0;
+		}
+
+		void for_mask(gsl::span<const unsigned char> blob, std::uint64_t ctx_mask)
+		{
+			const auto stats = compression::get_stats(blob, ctx_mask);
+			std::cout << "Total entropy content: " << compression::total_entropy(stats) << " / " << stats.total
+					  << " total bits" << std::endl;
+
+			std::cout << "Running entropy content: " << compression::running_entropy(blob, ctx_mask) << " / "
+					  << stats.total << " total bits" << std::endl;
+		}
 	}
 }
 
@@ -233,11 +310,16 @@ int main()
 	compression::div(maxprod, max);
 	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
 
-	const auto blob = compression::load_binary("main.cpp");
-	const auto stats = compression::get_stats(blob);
-	std::cout << "Total entropy content: " << compression::total_entropy(stats) << " / " << stats.total
+	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\out\\kernel.bin.lzss");
+	compression::for_mask(blob, 0xff);
+	compression::for_mask(blob, 0x7ff);
+	compression::for_mask(blob, 0xaa55);
+	compression::for_mask(blob, 0xeeee);
+	compression::for_mask(blob, 0x333333);
+
+	const std::array<std::uint64_t, 2> masks {0xff, 0x700};
+	std::cout << "Mixed entropy content: " << compression::mixed_entropy(blob, masks) << " / " << blob.size() * 8
 			  << " total bits" << std::endl;
 
-	std::cout << "Running entropy content: " << compression::running_entropy(blob) << " / " << stats.total
-			  << " total bits" << std::endl;
+	// compression::evolve_for(blob);
 }
