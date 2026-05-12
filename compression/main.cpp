@@ -142,7 +142,7 @@ namespace compression {
 				return b;
 			}
 
-			bool is_end() { return bitpos >> 3 == bytes.size(); }
+			bool is_end() { return (bitpos >> 3) >= bytes.size(); }
 		};
 
 		double contribution(double pvalue)
@@ -318,8 +318,24 @@ namespace compression {
 					nextbit();
 
 				std::uint64_t pos {};
-				while (n_inbound < n_bits)
+				while (n_inbound < n_bits) {
 					decode(pos++);
+					if (!(pos & 63))
+						std::memcpy(&gsl::at(decoded, ((pos >> 6) - 1) << 3), &slider, sizeof(slider));
+				}
+
+				/*const auto leftover_bits = pos & 63;
+				const auto bitpad = (8 - (leftover_bits & 7)) & 7;
+				const auto bytes = (leftover_bits + bitpad) >> 3;
+				slider <<= bitpad;
+				std::memcpy(&gsl::at(decoded, ((pos >> 6) - 1) << 3), &slider, bytes);*/
+			}
+
+			void write(gsl::czstring filename)
+			{
+				std::ofstream file {filename, std::ofstream::binary};
+				file.exceptions(file.badbit | file.failbit);
+				file.write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
 			}
 
 		private:
@@ -403,6 +419,12 @@ namespace compression {
 			{
 				while (!rdr.is_end())
 					encode();
+
+				/*const auto leftover_bits = n_outbound & 63;
+				const auto bitpad = (64 - leftover_bits) & 63;
+				outbound <<= bitpad;
+				std::memcpy(&gsl::at(encoded, ((n_outbound >> 6) - 1) << 3), &outbound, sizeof(outbound));
+				n_outbound += bitpad;*/
 
 				return static_cast<double>(n_outbound) / rdr.pos();
 			}
@@ -631,6 +653,7 @@ int main()
 
 	compression::decoder dec {encoded, 0x8080ff, 0x208000100000007, models, blob.size()};
 	dec.decode_all(n_bits);
+	dec.write("tapeout-rt.bin");
 
 	// compression::evolve_for(blob);
 }
