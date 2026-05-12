@@ -128,7 +128,7 @@ def main():
     print("Bitwise entropy:", bitwise_entropy(data))
 
     for mtype in [UniformModel, SimpleByteModel, SimpleMarkovModel]:
-        print(f"{mtype.__name__}: {entropy(data, mtype) / 8}")
+        print(f"{mtype.__name__}: {100.0 * entropy(data, mtype) / (l * 8)}%")
 
 
 if __name__ == "__main__":
