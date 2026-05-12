@@ -243,6 +243,85 @@ namespace compression {
 				will need to be zero-padded. This can be done by the head of the decompressed code.
 		*/
 
+		class decoder {
+		public:
+			decoder() = default;
+			decoder(
+				gsl::span<const unsigned char> input,
+				std::uint64_t ctx_mask,
+				std::uint64_t pos_mask,
+				gsl::span<bit_model> models,
+				std::uint64_t expected) :
+				decoder {}
+			{
+				rdr = bitreader {input};
+				this->ctx_mask = ctx_mask;
+				this->pos_mask = pos_mask;
+				ctx_bits = _mm_popcnt_u64(ctx_mask);
+				pos_bits = _mm_popcnt_u64(pos_mask);
+				this->models = models;
+				decoded.resize(expected);
+				for (auto& model : models) {
+					model.ones = 1;
+					model.total = 2;
+				}
+			}
+
+			std::uint64_t decode()
+			{
+				const auto pos = rdr.bitpos;
+				const auto idx = (_pext_u64(pos, pos_mask) << ctx_bits) | _pext_u64(slider, ctx_mask);
+				auto& model = gsl::at(models, idx);
+				const auto rwidth = rbound - lbound;
+				Expects(rwidth > 1);
+
+				auto tmp = mul(rwidth, model.ones);
+				div(tmp, model.total); // Throw away the remainder for now
+				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
+				// Clamping to ensure we always predict nonzero probability for each symbol
+				split = split == rwidth ? split - 1 : split;
+				split = split == 0 ? split + 1 : split;
+
+				const auto divider = lbound + split;
+				// Window's bit-reversed, that's why it's acting weird
+				const auto bit = rdr.window <= divider ? 1 : 0;
+				slider <<= 1;
+				slider |= bit;
+
+				model.ones += bit;
+				++model.total;
+
+				lbound = bit ? lbound : lbound + split;
+				rbound = bit ? lbound + split + 1 : rbound;
+
+				while ((~(lbound ^ rbound)) >> 63) {
+					++n_inbound;
+					lbound <<= 1;
+					rbound <<= 1;
+					rdr.next();
+				}
+			}
+
+			void decode_all(std::uint64_t n_bits)
+			{
+				while (n_inbound < n_bits)
+					decode();
+			}
+
+		private:
+			std::uint64_t lbound {};
+			std::uint64_t rbound {~lbound};
+			std::uint64_t slider {}; // The sliding window
+			std::uint64_t n_inbound {}; // How many bits of the outbound are pending
+			std::uint64_t ctx_mask {};
+			std::uint64_t pos_mask {};
+			std::uint64_t ctx_bits {};
+			std::uint64_t pos_bits {};
+			gsl::span<bit_model> models {};
+			std::vector<unsigned char> decoded {};
+			bitreader rdr {};
+		};
+
 		class encoder {
 		public:
 			encoder() = default;
@@ -250,11 +329,14 @@ namespace compression {
 				gsl::span<const unsigned char> input,
 				std::uint64_t ctx_mask,
 				std::uint64_t pos_mask,
-				gsl::span<bit_model> models) :
+				gsl::span<bit_model> models,
+				bool dry_run) :
 				encoder {}
 			{
 				rdr = bitreader {input};
-				encoded.resize(rdr.bytes.size());
+				if (!dry_run)
+					encoded.resize(rdr.bytes.size());
+
 				this->ctx_mask = ctx_mask;
 				this->pos_mask = pos_mask;
 				ctx_bits = _mm_popcnt_u64(ctx_mask);
@@ -297,11 +379,8 @@ namespace compression {
 					lbound <<= 1;
 					rbound <<= 1;
 
-					if (!outbound)
-						__debugbreak();
-
-					if ((n_outbound & 63) == 63)
-						std::memcpy(&gsl::at(encoded, n_outbound >> 3), &outbound, sizeof(outbound));
+					if (!encoded.empty() && (n_outbound & 63) == 63)
+						std::memcpy(&gsl::at(encoded, (n_outbound >> 6) << 3), &outbound, sizeof(outbound));
 				}
 			}
 
@@ -319,6 +398,10 @@ namespace compression {
 				file.exceptions(file.badbit | file.failbit);
 				const auto bytes = n_outbound / 8;
 				file.write(reinterpret_cast<const char*>(encoded.data()), n_outbound % 8 ? bytes + 1 : bytes);
+			}
+
+			std::pair<gsl::span<const unsigned char>, std::uint64_t> out()
+			{ return {encoded, n_outbound};
 			}
 
 		private:
@@ -418,13 +501,14 @@ namespace compression {
 					const auto pos_mask = mask.hi;
 					const auto popcnt = _mm_popcnt_u64(ctx_mask) + _mm_popcnt_u64(pos_mask);
 					if (popcnt <= maxbits) {
-						const auto e = running_entropy(
-							gsl::span {models}.subspan(0, gsl::narrow_cast<std::size_t>(1ull << popcnt)),
+						auto enc = encoder {
 							data,
 							ctx_mask,
-							pos_mask);
+							pos_mask,
+							gsl::span {models}.subspan(0, gsl::narrow_cast<std::size_t>(1ull << popcnt)),
+							true};
 
-						score = e / actual_bits;
+						score = enc.encode_all();
 					}
 					else {
 						score = static_cast<double>(actual_bits) + 1.0;
@@ -526,10 +610,14 @@ int main()
 						  0x6006); // and compression.exe again with more agressive population diversity */
 
 	std::vector<compression::bit_model> models(1 << 16);
-	compression::encoder enc {blob, 0x8080ff, 0x208000100000007, models};
+	compression::encoder enc {blob, 0x8080ff, 0x208000100000007, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
+	const auto [encoded, n_bits] = enc.out();
 
-	// compression::evolve_for(blob);
+	compression::decoder dec {encoded, 0x8080ff, 0x208000100000007, models, blob.size()};
+	dec.decode_all(n_bits);
+
+	//compression::evolve_for(blob);
 }
