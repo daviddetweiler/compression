@@ -111,6 +111,7 @@ namespace compression {
 
 		constexpr auto bitpos_mask = 63ull;
 
+		// Reads off the leftmost bit
 		struct bitreader {
 			gsl::span<const unsigned char> bytes {};
 			std::uint64_t bitpos {};
@@ -125,8 +126,8 @@ namespace compression {
 
 			std::uint64_t next()
 			{
-				const auto b = window & 1;
-				window >>= 1;
+				const auto b = window >> 63;
+				window <<= 1;
 				++bitpos;
 				if (!(bitpos & bitpos_mask)) {
 					const auto idx = bitpos >> 3;
@@ -312,6 +313,7 @@ namespace compression {
 			std::uint64_t lbound {};
 			std::uint64_t rbound {~lbound};
 			std::uint64_t slider {}; // The sliding window
+			std::uint64_t inbound {};
 			std::uint64_t n_inbound {}; // How many bits of the outbound are pending
 			std::uint64_t ctx_mask {};
 			std::uint64_t pos_mask {};
@@ -379,8 +381,8 @@ namespace compression {
 					lbound <<= 1;
 					rbound <<= 1;
 
-					if (!encoded.empty() && (n_outbound & 63) == 63)
-						std::memcpy(&gsl::at(encoded, (n_outbound >> 6) << 3), &outbound, sizeof(outbound));
+					if (!encoded.empty() && !(n_outbound & 63))
+						std::memcpy(&gsl::at(encoded, ((n_outbound >> 6) - 1) << 3), &outbound, sizeof(outbound));
 				}
 			}
 
