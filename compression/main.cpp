@@ -21,11 +21,8 @@ namespace compression {
 
 		uint128 shl(std::uint64_t v, unsigned int n)
 		{
-			if (n > 64)
-				std::abort();
-
-			if (n == 64)
-				return {v, {}};
+			if (n >= 64)
+				return {v << (n - 64), {}};
 
 			if (n == 0)
 				return {{}, v};
@@ -164,16 +161,20 @@ namespace compression {
 			return total;
 		}
 
-		model get_stats(gsl::span<const unsigned char> bytes, std::uint64_t ctx_mask)
+		model get_stats(gsl::span<const unsigned char> bytes, std::uint64_t ctx_mask, std::uint64_t pos_mask)
 		{
 			bitreader rdr {bytes};
 			std::uint64_t window {};
 			std::uint64_t total {};
-			std::vector<bit_model> dist(1ull << _mm_popcnt_u64(ctx_mask));
+			const auto ctx_bits = _mm_popcnt_u64(ctx_mask);
+			const auto pos_bits = _mm_popcnt_u64(pos_mask);
+			std::vector<bit_model> dist(1ull << (ctx_bits + pos_bits));
 			while (!rdr.is_end()) {
 				const auto ctx = _pext_u64(window, ctx_mask);
+				const auto pos = _pext_u64(total, pos_mask);
+				const auto idx = (pos << ctx_bits) | ctx;
 				const auto bit = rdr.next();
-				auto& model = gsl::at(dist, ctx);
+				auto& model = gsl::at(dist, idx);
 				if (bit)
 					++model.ones;
 
@@ -192,6 +193,7 @@ namespace compression {
 			std::uint64_t ctx_mask,
 			std::uint64_t pos_mask = {})
 		{
+			const auto ctx_bits = _mm_popcnt_u64(ctx_mask);
 			bitreader rdr {bytes};
 			std::uint64_t window {};
 			std::uint64_t total {};
@@ -203,60 +205,15 @@ namespace compression {
 			auto e_total = 0.0;
 			while (!rdr.is_end()) {
 				const auto ctx = _pext_u64(window, ctx_mask);
+				const auto pos = _pext_u64(total, pos_mask);
+				const auto idx = (pos << ctx_bits) | ctx;
 				const auto bit = rdr.next();
-				auto& model = gsl::at(dist, ctx);
+				auto& model = gsl::at(dist, idx);
 				e_total += entropy(model);
 				if (bit)
 					++model.ones;
 
 				++model.total;
-				window <<= 1;
-				window |= bit;
-				++total;
-			}
-
-			return e_total;
-		}
-
-		// Rather ill-advised, but for reasons which are unclear to me
-		double mixed_entropy(gsl::span<const unsigned char> bytes, gsl::span<const std::uint64_t> ctx_masks)
-		{
-			bitreader rdr {bytes};
-			std::uint64_t window {};
-			std::uint64_t total {};
-			std::vector<std::vector<bit_model>> dist_a(ctx_masks.size());
-			auto i = 0;
-			for (auto& dist : dist_a) {
-				const auto ctx_mask = gsl::at(ctx_masks, i);
-				dist.resize(1ull << _mm_popcnt_u64(ctx_mask));
-				for (auto& model : dist) {
-					model.total = 2;
-					model.ones = 1;
-				}
-
-				++i;
-			}
-
-			auto e_total = 0.0;
-			while (!rdr.is_end()) {
-				const auto bit = rdr.next();
-				auto pvalue = 0.0;
-				auto i = 0;
-				for (auto& dist : dist_a) {
-					const auto ctx_mask = gsl::at(ctx_masks, i);
-					const auto ctx = _pext_u64(window, ctx_mask);
-					auto& model = gsl::at(dist, ctx);
-					pvalue += static_cast<double>(model.ones) / model.total;
-					if (bit)
-						++model.ones;
-
-					++model.total;
-					++i;
-				}
-
-				pvalue /= dist_a.size();
-
-				e_total += contribution(pvalue) + contribution(1.0 - pvalue);
 				window <<= 1;
 				window |= bit;
 				++total;
@@ -275,54 +232,91 @@ namespace compression {
 			std::vector<unsigned char> encoded {};
 		};
 
-		constexpr auto mask_width = 64;
+		constexpr auto mask_width = 128;
 
-		std::uint64_t vary(std::mt19937& drbg, std::uint64_t mask)
+		void bit_or(uint128& dst, const uint128& src)
+		{
+			dst.lo |= src.lo;
+			dst.hi |= src.hi;
+		}
+
+		void bit_and(uint128& dst, const uint128& src)
+		{
+			dst.lo &= src.lo;
+			dst.hi &= src.hi;
+		}
+
+		void bit_xor(uint128& dst, const uint128& src)
+		{
+			dst.lo ^= src.lo;
+			dst.hi ^= src.hi;
+		}
+
+		void bit_not(uint128& dst)
+		{
+			dst.lo = ~dst.lo;
+			dst.hi = ~dst.hi;
+		}
+
+		uint128 vary(std::mt19937& drbg, const uint128& mask)
 		{
 			std::uniform_int_distribution bit_dist {0, mask_width - 1};
 			const auto bit = bit_dist(drbg);
-			const auto extract = mask & (1ull << bit);
-			const auto result = (mask ^ extract) | (~extract & (1ull << bit));
+			const auto select = shl(1ull, bit);
+			auto extract = mask;
+			bit_and(extract, select);
+
+			auto result = mask;
+			bit_xor(result, extract);
+			bit_not(extract);
+			bit_and(extract, select);
+			bit_or(result, extract);
+
 			return result; // Flip the bit
 		}
 
 		constexpr auto maxbits = 16;
 
-		std::uint64_t draw(std::mt19937& drbg)
+		uint128 draw(std::mt19937& drbg)
 		{
 			std::uniform_int_distribution nbit_dist {0, maxbits};
 			const auto nbits = nbit_dist(drbg);
 
 			auto lower = 0;
-			std::uint64_t value {};
+			uint128 value {};
 			for (auto i = 0; i < nbits && lower < mask_width; ++i) {
 				std::uniform_int_distribution nxbit_dist {lower, mask_width - 1};
 				const auto nxbit = nxbit_dist(drbg);
-				value |= (1ull << nxbit);
+				bit_or(value, shl(1ull, nxbit));
 				lower = nxbit + 1;
 			}
 
 			return value;
 		}
 
+		auto u128_popcnt(const uint128& src) { return _mm_popcnt_u64(src.hi) + _mm_popcnt_u64(src.lo); }
+
 		std::uint64_t evolve_for(gsl::span<const unsigned char> data)
 		{
 			constexpr auto relatives = 32;
-			std::mt19937 drbg {0xcafebabe};
-			std::vector<std::pair<std::uint64_t, double>> pool(256 * relatives);
+			std::mt19937 drbg {0xdeadbeef};
+			std::vector<std::pair<uint128, double>> pool(256 * relatives);
 			for (auto& gene : pool)
 				gene.first = draw(drbg);
 
 			const auto actual_bits = data.size() * 8;
 			std::vector<bit_model> models(1ull << maxbits);
-			for (auto i = 0; i < 100; ++i) {
-				for (auto& [ctx_mask, score] : pool) {
-					const auto popcnt = _mm_popcnt_u64(ctx_mask);
+			for (auto i = 0; i < 512; ++i) {
+				for (auto& [mask, score] : pool) {
+					const auto ctx_mask = mask.lo;
+					const auto pos_mask = mask.hi;
+					const auto popcnt = _mm_popcnt_u64(ctx_mask) + _mm_popcnt_u64(pos_mask);
 					if (popcnt <= maxbits) {
 						const auto e = running_entropy(
 							gsl::span {models}.subspan(0, gsl::narrow_cast<std::size_t>(1ull << popcnt)),
 							data,
-							ctx_mask);
+							ctx_mask,
+							pos_mask);
 
 						score = e / actual_bits;
 					}
@@ -331,19 +325,33 @@ namespace compression {
 					}
 				}
 
-				std::sort(pool.begin(), pool.end(), [](auto&& a, auto&& b) { return a.second < b.second; });
-				std::cout
-					<< std::format("Generation {} best score {} (0x{:x})", i, pool.front().second, pool.front().first)
-					<< std::endl;
+				std::sort(pool.begin(), pool.end(), [](auto&& a, auto&& b) {
+					if (a.second < b.second)
+						return true;
+
+					if (a.second == b.second && u128_popcnt(a.first) < u128_popcnt(b.first))
+						return true;
+
+					return false;
+				});
+				const auto& best = pool.front();
+				const auto logline = std::format(
+					"Generation {} best score {} (ctx: 0x{:x}, pos: 0x{:x})",
+					i,
+					best.second,
+					best.first.lo,
+					best.first.hi);
+
+				std::cout << logline << std::endl;
 
 				for (auto j = 0; j < relatives; ++j) {
 					const auto mask = gsl::at(pool, j);
 					const auto off = j * relatives;
 					gsl::at(pool, off) = mask;
 					for (auto jp = 1; jp < relatives; ++jp) {
-						std::uniform_int_distribution coin {0, 1};
+						std::bernoulli_distribution coin {0.5};
 						auto newmask = vary(drbg, mask.first);
-						if (coin(drbg))
+						for (auto retry = 0; retry < mask_width && coin(drbg); ++retry)
 							newmask = vary(drbg, newmask);
 
 						gsl::at(pool, off + jp).first = newmask;
@@ -354,15 +362,20 @@ namespace compression {
 			return 0;
 		}
 
-		void for_mask(gsl::span<const unsigned char> blob, std::uint64_t ctx_mask)
+		void for_mask(gsl::span<const unsigned char> blob, std::uint64_t ctx_mask, std::uint64_t pos_mask = {})
 		{
-			const auto stats = compression::get_stats(blob, ctx_mask);
-			std::cout << "Total entropy content: " << 100.0 * compression::total_entropy(stats) / stats.total << " %"
-					  << std::endl;
+			const auto stats = compression::get_stats(blob, ctx_mask, pos_mask);
+			const auto total_percent = 100.0 * compression::total_entropy(stats) / stats.total;
 
-			std::vector<bit_model> models(1ull << _mm_popcnt_u64(ctx_mask));
-			std::cout << "Running entropy content: "
-					  << 100.0 * compression::running_entropy(models, blob, ctx_mask) / stats.total << " %"
+			std::vector<bit_model> models(1ull << (_mm_popcnt_u64(ctx_mask) + _mm_popcnt_u64(pos_mask)));
+			const auto running_percent
+				= 100.0 * compression::running_entropy(models, blob, ctx_mask, pos_mask) / stats.total;
+
+			std::cout << std::format(
+				"{} %\t{} %\t{} %",
+				total_percent,
+				running_percent,
+				100.0 * running_percent / total_percent)
 					  << std::endl;
 		}
 	}
@@ -378,7 +391,7 @@ int main()
 	compression::div(maxprod, max);
 	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
 
-	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\out\\kernel.bin");
+	const auto blob = compression::load_binary("C:\\Users\\david\\source\\compression\\compression\\main.cpp");
 	compression::for_mask(blob, 0xff);
 	compression::for_mask(blob, 0x7ff);
 	compression::for_mask(blob, 0xaa55);
@@ -387,9 +400,13 @@ int main()
 	compression::for_mask(blob, 0xa0000000020081bf); // Best for current kernel.bin
 	compression::for_mask(blob, 0xa0ebff); // Best for current kernel.asm
 
-	const std::array<std::uint64_t, 2> masks {0xff, 0x700};
-	std::cout << "Mixed entropy content: " << compression::mixed_entropy(blob, masks) << " / " << blob.size() * 8
-			  << " total bits" << std::endl;
+	// With positional context, the algorithm found: 0x800000ff, 0xc00010000017 with a 40% compression ratio from
+	// coding alone. For kernel.bin, ofc.
+	compression::for_mask(blob, 0x800000ff, 0xc00010000017);
+	compression::for_mask(blob, 0x1000ff, 0x30000060007); // and silicon-debug.exe
+	compression::for_mask(blob, 0x2bff, 0x100007); // and compression.exe release build
+	compression::for_mask(blob, 0x80e3ff, 0x6); // and kernel.asm
+	compression::for_mask(blob, 0x8080ff, 0x208000100000007); // and main.cpp
 
 	compression::evolve_for(blob);
 }

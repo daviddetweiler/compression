@@ -8,3 +8,4 @@
 /vcpkg_installed/x64-windows
 /compression/x64/Release
 /x64/Release
+*.bw
