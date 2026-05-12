@@ -622,8 +622,8 @@ int main()
 	compression::div(maxprod, max);
 	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
 
-	const auto blob = compression::load_binary("C:\\Users\\david\\source\\compression\\compression\\main.cpp");
-	/* compression::for_mask(blob, 0xff);
+	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\out\\kernel.bin");
+	compression::for_mask(blob, 0xff);
 	compression::for_mask(blob, 0x7ff);
 	compression::for_mask(blob, 0xaa55);
 	compression::for_mask(blob, 0xeeee);
@@ -636,24 +636,23 @@ int main()
 	compression::for_mask(blob, 0x800000ff, 0xc00010000017);
 	compression::for_mask(blob, 0x1000ff, 0x30000060007); // and silicon-debug.exe
 	compression::for_mask(blob, 0x2bff, 0x100007); // and compression.exe release build
-	compression::for_mask(blob, 0x80e3ff, 0x6); // and kernel.asm */
+	compression::for_mask(blob, 0x80e3ff, 0x6); // and kernel.asm
 	compression::for_mask(blob, 0x8080ff, 0x208000100000007); // and main.cpp
-	// compression::for_mask(blob, 0x3e3ff, 0x4); // and assorted.tex
-	/* compression::for_mask(
-		blob,
-		0x21a047,
-						  0x6006); // and compression.exe again with more agressive population diversity */
+	compression::for_mask(blob, 0x3e3ff, 0x4); // and assorted.tex
+	// and compression.exe again with more agressive population diversity
+	compression::for_mask(blob, 0x21a047, 0x6006);
+	compression::for_mask(blob, 0x20ff, 0x3f); // kernel.bin post- AC encoder
 
 	std::vector<compression::bit_model> models(1 << 16);
-	compression::encoder enc {blob, 0x8080ff, 0x208000100000007, models, false};
+	compression::encoder enc {blob, 0x20ff, 0x3f, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
 	const auto [encoded, n_bits] = enc.out();
 
-	compression::decoder dec {encoded, 0x8080ff, 0x208000100000007, models, blob.size()};
+	compression::decoder dec {encoded, 0x20ff, 0x3f, models, blob.size()};
 	dec.decode_all(n_bits);
 	dec.write("tapeout-rt.bin");
 
-	// compression::evolve_for(blob);
+	compression::evolve_for(blob);
 }
