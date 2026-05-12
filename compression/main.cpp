@@ -112,9 +112,11 @@ namespace compression {
 		constexpr auto bitpos_mask = 63ull;
 
 		struct bitreader {
-			gsl::span<const unsigned char> bytes;
-			std::uint64_t bitpos;
-			std::uint64_t window;
+			gsl::span<const unsigned char> bytes {};
+			std::uint64_t bitpos {};
+			std::uint64_t window {};
+
+			bitreader() = default;
 
 			bitreader(gsl::span<const unsigned char> bytes) : bytes {bytes}, bitpos {}, window {}
 			{
@@ -222,14 +224,116 @@ namespace compression {
 			return e_total;
 		}
 
+		/*
+			A little bit of context here; at all times:
+			- [lbound, rbound] represent the _last_ 64 bits of an interval
+			- Based off of the probability that the next bit is set, we pick either the upper or lower subrange
+				(how do we deal with remainders? They will contribute upon renormalization)...
+			- If the top n bits agree, shift them out
+			- If the top bits disagree but it's one of those 0b0111111... 0b10000.... situations, we shift the upper two
+				bits into the encoding queue (where they can still be rewritten), and keep track of how many bits are
+				added to the tail
+				- This is the bulkiest part of encoding / decoding logic imo
+			- The goal is to always have all 64 bits of window available to us to build subranges out of
+			- In general the subrange width will have a remainder, which we will want to accumulate, concurrently shift,
+				and occassionally take bits out of on overflow or getting big enough. But the denominator will be
+		   constantly changing (cry)
+				- Depending on complexity here, it may be worth simply truncating the model precision
+			- Every time 64 bits have been added to the encoding queue, we write the entire queue out. The last queue
+				will need to be zero-padded. This can be done by the head of the decompressed code.
+		*/
+
 		class encoder {
 		public:
+			encoder() = default;
+			encoder(
+				gsl::span<const unsigned char> input,
+				std::uint64_t ctx_mask,
+				std::uint64_t pos_mask,
+				gsl::span<bit_model> models) :
+				encoder {}
+			{
+				rdr = bitreader {input};
+				encoded.resize(rdr.bytes.size());
+				this->ctx_mask = ctx_mask;
+				this->pos_mask = pos_mask;
+				ctx_bits = _mm_popcnt_u64(ctx_mask);
+				pos_bits = _mm_popcnt_u64(pos_mask);
+				this->models = models;
+				for (auto& model : models) {
+					model.ones = 1;
+					model.total = 2;
+				}
+			}
+
+			// One bit only!
+			void encode()
+			{
+				const auto pos = rdr.bitpos;
+				const auto bit = rdr.next();
+				const auto idx = (_pext_u64(pos, pos_mask) << ctx_bits) | _pext_u64(slider, ctx_mask);
+				slider = (slider << 1) | bit;
+				auto& model = gsl::at(models, idx);
+				const auto rwidth = rbound - lbound;
+				Expects(rwidth > 1);
+				auto tmp = mul(rwidth, model.ones);
+				div(tmp, model.total); // Throw away the remainder for now
+				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
+				// Clamping to ensure we always predict nonzero probability for each symbol
+				split = split == rwidth ? split - 1 : split;
+				split = split == 0 ? split + 1 : split;
+				model.ones += bit;
+				++model.total;
+
+				// what happens when the range collapses hmmmmmmmmm
+				// I.e. what if the distribution predicts zero probability for 0?
+				lbound = bit ? lbound : lbound + split;
+				rbound = bit ? lbound + split + 1 : rbound;
+
+				while ((~(lbound ^ rbound)) >> 63) {
+					outbound <<= 1;
+					outbound |= (lbound >> 63);
+					++n_outbound; // Throw away the output bits for now
+					lbound <<= 1;
+					rbound <<= 1;
+
+					if (!outbound)
+						__debugbreak();
+
+					if ((n_outbound & 63) == 63)
+						std::memcpy(&gsl::at(encoded, n_outbound >> 3), &outbound, sizeof(outbound));
+				}
+			}
+
+			double encode_all()
+			{
+				while (!rdr.is_end())
+					encode();
+
+				return static_cast<double>(n_outbound) / rdr.bitpos;
+			}
+
+			void write(gsl::czstring filename)
+			{
+				std::ofstream file {filename, std::ofstream::binary};
+				file.exceptions(file.badbit | file.failbit);
+				const auto bytes = n_outbound / 8;
+				file.write(reinterpret_cast<const char*>(encoded.data()), n_outbound % 8 ? bytes + 1 : bytes);
+			}
+
 		private:
 			std::uint64_t lbound {};
 			std::uint64_t rbound {~lbound};
 			std::uint64_t slider {}; // The sliding window
-			std::uint64_t bitpos {}; // Count of bits in use
+			std::uint64_t outbound {};
+			std::uint64_t n_outbound {}; // How many bits of the outbound are pending
+			std::uint64_t ctx_mask {};
+			std::uint64_t pos_mask {};
+			std::uint64_t ctx_bits {};
+			std::uint64_t pos_bits {};
+			gsl::span<bit_model> models {};
 			std::vector<unsigned char> encoded {};
+			bitreader rdr {};
 		};
 
 		constexpr auto mask_width = 128;
@@ -298,9 +402,11 @@ namespace compression {
 
 		std::uint64_t evolve_for(gsl::span<const unsigned char> data)
 		{
+			constexpr auto elites = 32;
 			constexpr auto relatives = 32;
+			static_assert(elites <= relatives, "you're biasing the distribution");
 			std::mt19937 drbg {0xdeadbeef};
-			std::vector<std::pair<uint128, double>> pool(256 * relatives);
+			std::vector<std::pair<uint128, double>> pool(elites * relatives);
 			for (auto& gene : pool)
 				gene.first = draw(drbg);
 
@@ -334,6 +440,7 @@ namespace compression {
 
 					return false;
 				});
+
 				const auto& best = pool.front();
 				const auto logline = std::format(
 					"Generation {} best score {} (ctx: 0x{:x}, pos: 0x{:x})",
@@ -344,10 +451,15 @@ namespace compression {
 
 				std::cout << logline << std::endl;
 
-				for (auto j = 0; j < relatives; ++j) {
+				for (auto j = 0; j < elites; ++j) {
 					const auto mask = gsl::at(pool, j);
 					const auto off = j * relatives;
 					gsl::at(pool, off) = mask;
+				}
+
+				for (auto j = 0; j < elites; ++j) {
+					const auto off = j * relatives;
+					const auto mask = gsl::at(pool, off);
 					for (auto jp = 1; jp < relatives; ++jp) {
 						std::bernoulli_distribution coin {0.5};
 						auto newmask = vary(drbg, mask.first);
@@ -392,7 +504,7 @@ int main()
 	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
 
 	const auto blob = compression::load_binary("C:\\Users\\david\\source\\compression\\compression\\main.cpp");
-	compression::for_mask(blob, 0xff);
+	/* compression::for_mask(blob, 0xff);
 	compression::for_mask(blob, 0x7ff);
 	compression::for_mask(blob, 0xaa55);
 	compression::for_mask(blob, 0xeeee);
@@ -405,8 +517,19 @@ int main()
 	compression::for_mask(blob, 0x800000ff, 0xc00010000017);
 	compression::for_mask(blob, 0x1000ff, 0x30000060007); // and silicon-debug.exe
 	compression::for_mask(blob, 0x2bff, 0x100007); // and compression.exe release build
-	compression::for_mask(blob, 0x80e3ff, 0x6); // and kernel.asm
+	compression::for_mask(blob, 0x80e3ff, 0x6); // and kernel.asm */
 	compression::for_mask(blob, 0x8080ff, 0x208000100000007); // and main.cpp
+	// compression::for_mask(blob, 0x3e3ff, 0x4); // and assorted.tex
+	/* compression::for_mask(
+		blob,
+		0x21a047,
+						  0x6006); // and compression.exe again with more agressive population diversity */
 
-	compression::evolve_for(blob);
+	std::vector<compression::bit_model> models(1 << 16);
+	compression::encoder enc {blob, 0x8080ff, 0x208000100000007, models};
+	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
+
+	enc.write("tapeout.bin");
+
+	// compression::evolve_for(blob);
 }
