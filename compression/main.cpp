@@ -113,16 +113,20 @@ namespace compression {
 
 		// Reads off the leftmost bit
 		struct bitreader {
+		private:
 			gsl::span<const unsigned char> bytes {};
 			std::uint64_t bitpos {};
 			std::uint64_t window {};
 
+		public:
 			bitreader() = default;
 
 			bitreader(gsl::span<const unsigned char> bytes) : bytes {bytes}, bitpos {}, window {}
 			{
 				std::memcpy(&window, bytes.data(), sizeof(window));
 			}
+
+			std::uint64_t pos() { return bitpos; }
 
 			std::uint64_t next()
 			{
@@ -268,9 +272,8 @@ namespace compression {
 				}
 			}
 
-			std::uint64_t decode()
+			void decode(std::uint64_t pos)
 			{
-				const auto pos = rdr.bitpos;
 				const auto idx = (_pext_u64(pos, pos_mask) << ctx_bits) | _pext_u64(slider, ctx_mask);
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
@@ -285,7 +288,7 @@ namespace compression {
 
 				const auto divider = lbound + split;
 				// Window's bit-reversed, that's why it's acting weird
-				const auto bit = rdr.window <= divider ? 1 : 0;
+				const auto bit = inbound <= divider ? 1 : 0;
 				slider <<= 1;
 				slider |= bit;
 
@@ -296,17 +299,27 @@ namespace compression {
 				rbound = bit ? lbound + split + 1 : rbound;
 
 				while ((~(lbound ^ rbound)) >> 63) {
-					++n_inbound;
 					lbound <<= 1;
 					rbound <<= 1;
-					rdr.next();
+					nextbit();
 				}
+			}
+
+			void nextbit()
+			{
+				inbound <<= 1;
+				inbound |= rdr.next();
+				++n_inbound;
 			}
 
 			void decode_all(std::uint64_t n_bits)
 			{
+				for (auto i = 0; i < 64; ++i)
+					nextbit();
+
+				std::uint64_t pos {};
 				while (n_inbound < n_bits)
-					decode();
+					decode(pos++);
 			}
 
 		private:
@@ -337,7 +350,7 @@ namespace compression {
 			{
 				rdr = bitreader {input};
 				if (!dry_run)
-					encoded.resize(rdr.bytes.size());
+					encoded.resize(input.size());
 
 				this->ctx_mask = ctx_mask;
 				this->pos_mask = pos_mask;
@@ -353,7 +366,7 @@ namespace compression {
 			// One bit only!
 			void encode()
 			{
-				const auto pos = rdr.bitpos;
+				const auto pos = rdr.pos();
 				const auto bit = rdr.next();
 				const auto idx = (_pext_u64(pos, pos_mask) << ctx_bits) | _pext_u64(slider, ctx_mask);
 				slider = (slider << 1) | bit;
@@ -391,7 +404,7 @@ namespace compression {
 				while (!rdr.is_end())
 					encode();
 
-				return static_cast<double>(n_outbound) / rdr.bitpos;
+				return static_cast<double>(n_outbound) / rdr.pos();
 			}
 
 			void write(gsl::czstring filename)
@@ -402,9 +415,7 @@ namespace compression {
 				file.write(reinterpret_cast<const char*>(encoded.data()), n_outbound % 8 ? bytes + 1 : bytes);
 			}
 
-			std::pair<gsl::span<const unsigned char>, std::uint64_t> out()
-			{ return {encoded, n_outbound};
-			}
+			std::pair<gsl::span<const unsigned char>, std::uint64_t> out() { return {encoded, n_outbound}; }
 
 		private:
 			std::uint64_t lbound {};
@@ -621,5 +632,5 @@ int main()
 	compression::decoder dec {encoded, 0x8080ff, 0x208000100000007, models, blob.size()};
 	dec.decode_all(n_bits);
 
-	//compression::evolve_for(blob);
+	// compression::evolve_for(blob);
 }
