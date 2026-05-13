@@ -100,8 +100,8 @@ namespace compression {
 		}
 
 		struct bit_model {
-			std::uint32_t ones;
-			std::uint32_t total;
+			std::uint64_t ones;
+			std::uint64_t total;
 		};
 
 		struct model {
@@ -622,18 +622,20 @@ int main()
 	compression::div(maxprod, max);
 	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
 
-	const auto blob = compression::load_binary("C:\\Users\\david\\source\\compression\\compression\\main.cpp");
+	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\src\\kernel.asm");
 
-	/*std::vector<compression::bit_model> models(1 << 16);
-	compression::encoder enc {blob, 0x20ff, 0x3f, models, false};
+	std::vector<compression::bit_model> models(1 << 16);
+	// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest N
+	// bits of context, are the most important.
+	compression::encoder enc {blob, 0xff, 0x7, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
 	const auto [encoded, n_bits] = enc.out();
 
-	compression::decoder dec {encoded, 0x20ff, 0x3f, models, blob.size()};
+	compression::decoder dec {encoded, 0xff, 0x7, models, blob.size()};
 	dec.decode_all(n_bits);
-	dec.write("tapeout-rt.bin");*/
+	dec.write("tapeout-rt.bin");
 
-	compression::evolve_for(blob);
+	//compression::evolve_for(blob);
 }
