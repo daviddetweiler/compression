@@ -30,6 +30,22 @@ namespace compression {
 			return {v >> (64 - n), v << n};
 		}
 
+		void shr(uint128& dst, unsigned int n)
+		{
+			if (n == 0)
+				return;
+
+			if (n >= 64) {
+				dst.lo = dst.hi >> (n - 64);
+				dst.hi = 0;
+			}
+			else {
+				dst.lo >>= n;
+				dst.lo |= dst.hi << (64 - n);
+				dst.hi >>= n;
+			}
+		}
+
 		void add(uint128& dst, const uint128& src)
 		{
 			const auto old = dst.lo;
@@ -102,6 +118,10 @@ namespace compression {
 		struct bit_model {
 			std::uint32_t ones;
 			std::uint32_t total;
+		};
+
+		struct slide_model {
+			std::uint16_t ones;
 		};
 
 		struct model {
@@ -353,6 +373,9 @@ namespace compression {
 			bitreader rdr {};
 		};
 
+		constexpr auto slide_bits = 16;
+		constexpr auto slide_mask = (1u << slide_bits) - 1;
+
 		class encoder {
 		public:
 			encoder() = default;
@@ -360,7 +383,7 @@ namespace compression {
 				gsl::span<const unsigned char> input,
 				std::uint64_t ctx_mask,
 				std::uint64_t pos_mask,
-				gsl::span<bit_model> models,
+				gsl::span<slide_model> models,
 				bool dry_run) :
 				encoder {}
 			{
@@ -373,10 +396,8 @@ namespace compression {
 				ctx_bits = _mm_popcnt_u64(ctx_mask);
 				pos_bits = _mm_popcnt_u64(pos_mask);
 				this->models = models;
-				for (auto& model : models) {
-					model.ones = 1;
-					model.total = 2;
-				}
+				for (auto& model : models)
+					model.ones = 1 << (slide_bits - 1);
 			}
 
 			// One bit only!
@@ -390,13 +411,16 @@ namespace compression {
 				const auto rwidth = rbound - lbound;
 				Expects(rwidth > 1);
 				auto tmp = mul(rwidth, model.ones);
-				div(tmp, model.total); // Throw away the remainder for now
-				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
+				shr(tmp, slide_bits); // Throw away the remainder for now
+				auto split = tmp.lo; // Yes, the rounding is bad if the remainder was non-zero
 				// Clamping to ensure we always predict nonzero probability for each symbol
 				split = split == rwidth ? split - 1 : split;
 				split = split == 0 ? split + 1 : split;
-				model.ones += gsl::narrow_cast<std::uint32_t>(bit);
-				++model.total;
+
+				if (bit && model.ones != slide_mask)
+					++model.ones;
+				else if (!bit && model.ones != 0)
+					--model.ones;
 
 				// what happens when the range collapses hmmmmmmmmm
 				// I.e. what if the distribution predicts zero probability for 0?
@@ -449,7 +473,7 @@ namespace compression {
 			std::uint64_t pos_mask {};
 			std::uint64_t ctx_bits {};
 			std::uint64_t pos_bits {};
-			gsl::span<bit_model> models {};
+			gsl::span<slide_model> models {};
 			std::vector<unsigned char> encoded {};
 			bitreader rdr {};
 		};
@@ -529,7 +553,7 @@ namespace compression {
 				gene.first = draw(drbg);
 
 			const auto actual_bits = data.size() * 8;
-			std::vector<bit_model> models(1ull << maxbits);
+			std::vector<slide_model> models(1ull << maxbits);
 			for (auto i = 0; i < 512; ++i) {
 				for (auto& [mask, score] : pool) {
 					const auto ctx_mask = mask.lo;
@@ -616,6 +640,11 @@ int main()
 {
 	const auto result = compression::mul(0xdeadbeefcafebabeull, 0xdeadbeefcafebabeull);
 	std::cout << result.hi << " " << result.lo << std::endl;
+
+	compression::uint128 value {0xffeeddccbbaa9988, 0x7766554433221100};
+	const compression::uint128 expected {0xffeeddccbbaa99, 0x8877665544332211};
+	shr(value, 8);
+	Expects(value == expected);
 
 	const auto max = ~std::uint64_t {};
 	auto maxprod = compression::mul(max, max);
