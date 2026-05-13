@@ -49,18 +49,18 @@ namespace compression {
 
 		uint128 mul(std::uint64_t a, std::uint64_t b)
 		{
-			uint128 accum {};
-			accum.lo = a;
+			constexpr auto mask32 = (1ull << 32) - 1;
+			const auto a0 = a & mask32;
+			const auto b0 = b & mask32;
+			const auto a1 = a >> 32;
+			const auto b1 = b >> 32;
 
-			uint128 result {};
-			for (; b; b >>= 1, add(accum, accum)) {
-				if (!(b & 1))
-					continue;
+			uint128 prod = shl(a0 * b0, 0);
+			add(prod, shl(a0 * b1, 32));
+			add(prod, shl(a1 * b0, 32));
+			add(prod, shl(a1 * b1, 64));
 
-				add(result, accum);
-			}
-
-			return result;
+			return prod;
 		}
 
 		bool lt(const uint128& a, const uint128& b) { return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo); }
@@ -100,8 +100,8 @@ namespace compression {
 		}
 
 		struct bit_model {
-			std::uint64_t ones;
-			std::uint64_t total;
+			std::uint32_t ones;
+			std::uint32_t total;
 		};
 
 		struct model {
@@ -395,7 +395,7 @@ namespace compression {
 				// Clamping to ensure we always predict nonzero probability for each symbol
 				split = split == rwidth ? split - 1 : split;
 				split = split == 0 ? split + 1 : split;
-				model.ones += bit;
+				model.ones += gsl::narrow_cast<std::uint32_t>(bit);
 				++model.total;
 
 				// what happens when the range collapses hmmmmmmmmm
@@ -497,7 +497,7 @@ namespace compression {
 			return result; // Flip the bit
 		}
 
-		constexpr auto maxbits = 16;
+		constexpr auto maxbits = 11;
 
 		uint128 draw(std::mt19937& drbg)
 		{
@@ -571,14 +571,14 @@ namespace compression {
 				std::cout << logline << std::endl;
 
 				for (auto j = 0; j < elites; ++j) {
-					const auto mask = gsl::at(pool, j);
+					const auto& mask = gsl::at(pool, j);
 					const auto off = j * relatives;
 					gsl::at(pool, off) = mask;
 				}
 
 				for (auto j = 0; j < elites; ++j) {
 					const auto off = j * relatives;
-					const auto mask = gsl::at(pool, off);
+					const auto& mask = gsl::at(pool, off);
 					for (auto jp = 1; jp < relatives; ++jp) {
 						std::bernoulli_distribution coin {0.5};
 						auto newmask = vary(drbg, mask.first);
@@ -614,7 +614,7 @@ namespace compression {
 
 int main()
 {
-	const auto result = compression::mul(~std::uint64_t {}, 0xdeadbeefcafebabeull);
+	const auto result = compression::mul(0xdeadbeefcafebabeull, 0xdeadbeefcafebabeull);
 	std::cout << result.hi << " " << result.lo << std::endl;
 
 	const auto max = ~std::uint64_t {};
@@ -622,28 +622,9 @@ int main()
 	compression::div(maxprod, max);
 	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
 
-	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\out\\kernel.bin");
-	compression::for_mask(blob, 0xff);
-	compression::for_mask(blob, 0x7ff);
-	compression::for_mask(blob, 0xaa55);
-	compression::for_mask(blob, 0xeeee);
-	compression::for_mask(blob, 0x333333);
-	compression::for_mask(blob, 0xa0000000020081bf); // Best for current kernel.bin
-	compression::for_mask(blob, 0xa0ebff); // Best for current kernel.asm
+	const auto blob = compression::load_binary("C:\\Users\\david\\source\\compression\\compression\\main.cpp");
 
-	// With positional context, the algorithm found: 0x800000ff, 0xc00010000017 with a 40% compression ratio from
-	// coding alone. For kernel.bin, ofc.
-	compression::for_mask(blob, 0x800000ff, 0xc00010000017);
-	compression::for_mask(blob, 0x1000ff, 0x30000060007); // and silicon-debug.exe
-	compression::for_mask(blob, 0x2bff, 0x100007); // and compression.exe release build
-	compression::for_mask(blob, 0x80e3ff, 0x6); // and kernel.asm
-	compression::for_mask(blob, 0x8080ff, 0x208000100000007); // and main.cpp
-	compression::for_mask(blob, 0x3e3ff, 0x4); // and assorted.tex
-	// and compression.exe again with more agressive population diversity
-	compression::for_mask(blob, 0x21a047, 0x6006);
-	compression::for_mask(blob, 0x20ff, 0x3f); // kernel.bin post- AC encoder
-
-	std::vector<compression::bit_model> models(1 << 16);
+	/*std::vector<compression::bit_model> models(1 << 16);
 	compression::encoder enc {blob, 0x20ff, 0x3f, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
@@ -652,7 +633,7 @@ int main()
 
 	compression::decoder dec {encoded, 0x20ff, 0x3f, models, blob.size()};
 	dec.decode_all(n_bits);
-	dec.write("tapeout-rt.bin");
+	dec.write("tapeout-rt.bin");*/
 
 	compression::evolve_for(blob);
 }
