@@ -151,6 +151,14 @@ namespace compression {
 			return std::isnan(c) ? 0.0 : c;
 		}
 
+		double bits_for_symbol(const bit_model& model, std::uint64_t bit)
+		{
+			const auto ones = static_cast<double>(model.ones) / model.total;
+			const auto pvalue = bit ? ones : 1.0 - ones;
+			const auto bits = std::log2(pvalue);
+			return -bits;
+		}
+
 		double entropy(const bit_model& model)
 		{
 			const auto total = static_cast<double>(model.total);
@@ -216,7 +224,7 @@ namespace compression {
 				const auto idx = (pos << ctx_bits) | ctx;
 				const auto bit = rdr.next();
 				auto& model = gsl::at(dist, idx);
-				e_total += entropy(model);
+				e_total += bits_for_symbol(model, bit);
 				if (bit)
 					++model.ones;
 
@@ -536,14 +544,12 @@ namespace compression {
 					const auto pos_mask = mask.hi;
 					const auto popcnt = _mm_popcnt_u64(ctx_mask) + _mm_popcnt_u64(pos_mask);
 					if (popcnt <= maxbits) {
-						auto enc = encoder {
-							data,
-							ctx_mask,
-							pos_mask,
-							gsl::span {models}.subspan(0, gsl::narrow_cast<std::size_t>(1ull << popcnt)),
-							true};
-
-						score = enc.encode_all();
+						score = running_entropy(
+									gsl::span {models}.subspan(0, gsl::narrow_cast<std::size_t>(1ull << popcnt)),
+									data,
+									ctx_mask,
+									pos_mask)
+							/ actual_bits;
 					}
 					else {
 						score = static_cast<double>(actual_bits) + 1.0;
@@ -627,15 +633,15 @@ int main()
 	std::vector<compression::bit_model> models(1 << 16);
 	// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest N
 	// bits of context, are the most important.
-	compression::encoder enc {blob, 0xff, 0x7, models, false};
+	compression::encoder enc {blob, 0x3bf, 0x6, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
 	const auto [encoded, n_bits] = enc.out();
 
-	compression::decoder dec {encoded, 0xff, 0x7, models, blob.size()};
+	compression::decoder dec {encoded, 0x3bf, 0x6, models, blob.size()};
 	dec.decode_all(n_bits);
 	dec.write("tapeout-rt.bin");
 
-	//compression::evolve_for(blob);
+	compression::evolve_for(blob);
 }
