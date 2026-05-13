@@ -256,22 +256,38 @@ namespace compression {
 				will need to be zero-padded. This can be done by the head of the decompressed code.
 		*/
 
+		class model_context {
+		public:
+			model_context(std::uint64_t ctx_mask, std::uint64_t pos_mask) noexcept :
+				ctx_mask {ctx_mask},
+				pos_mask {pos_mask},
+				ctx_bits {gsl::narrow<unsigned int>(_mm_popcnt_u64(ctx_mask))}
+			{
+			}
+
+			std::uint64_t extract(std::uint64_t nearbits, std::uint64_t bitpos) const noexcept
+			{
+				return (_pext_u64(bitpos, pos_mask) << ctx_bits) | _pext_u64(nearbits, ctx_mask);
+			}
+
+		private:
+			std::uint64_t ctx_mask;
+			std::uint64_t pos_mask;
+			unsigned int ctx_bits;
+		};
+
 		class decoder {
 		public:
 			decoder() = default;
 			decoder(
 				gsl::span<const unsigned char> input,
-				std::uint64_t ctx_mask,
-				std::uint64_t pos_mask,
+				const model_context& context,
 				gsl::span<bit_model> models,
 				std::uint64_t expected) :
 				decoder {}
 			{
 				rdr = bitreader {input};
-				this->ctx_mask = ctx_mask;
-				this->pos_mask = pos_mask;
-				ctx_bits = _mm_popcnt_u64(ctx_mask);
-				pos_bits = _mm_popcnt_u64(pos_mask);
+				this->context = context;
 				this->models = models;
 				decoded.resize(expected);
 				for (auto& model : models) {
@@ -282,7 +298,7 @@ namespace compression {
 
 			void decode(std::uint64_t pos)
 			{
-				const auto idx = (_pext_u64(pos, pos_mask) << ctx_bits) | _pext_u64(slider, ctx_mask);
+				const auto idx = context.extract(slider, pos);
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
 				Expects(rwidth > 1);
@@ -352,22 +368,45 @@ namespace compression {
 			std::uint64_t slider {}; // The sliding window
 			std::uint64_t inbound {};
 			std::uint64_t n_inbound {}; // How many bits of the outbound are pending
-			std::uint64_t ctx_mask {};
-			std::uint64_t pos_mask {};
-			std::uint64_t ctx_bits {};
-			std::uint64_t pos_bits {};
+			model_context context {0, 0};
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> decoded {};
 			bitreader rdr {};
 		};
 
+		// Needs finalization
+		class bitwriter {
+		public:
+			void emit(unsigned int bit)
+			{
+				queued <<= 1;
+				queued |= bit;
+				++pos;
+				if (!(pos & 63)) {
+					const auto wordpos = (pos >> 6) - 1;
+					const auto bytepos = wordpos << 3;
+					std::memcpy(&buffer[bytepos], &queued, sizeof(queued));
+				}
+			}
+
+			void flush() {
+				const auto n_trailing = 
+			}
+
+		private:
+			std::uint64_t queued {};
+			std::uint64_t pos {};
+			gsl::span<unsigned char> buffer {};
+		};
+
+		// This desparately needs unit-testing
+		// And testing how closely the entropy estimation tracks the encoder (same final model states)
 		class encoder {
 		public:
 			encoder() = default;
 			encoder(
 				gsl::span<const unsigned char> input,
-				std::uint64_t ctx_mask,
-				std::uint64_t pos_mask,
+				const model_context& context,
 				gsl::span<bit_model> models,
 				bool dry_run) :
 				encoder {}
@@ -376,10 +415,7 @@ namespace compression {
 				if (!dry_run)
 					encoded.resize(input.size());
 
-				this->ctx_mask = ctx_mask;
-				this->pos_mask = pos_mask;
-				ctx_bits = _mm_popcnt_u64(ctx_mask);
-				pos_bits = _mm_popcnt_u64(pos_mask);
+				this->context = context;
 				this->models = models;
 				for (auto& model : models) {
 					model.ones = 1;
@@ -392,7 +428,7 @@ namespace compression {
 			{
 				const auto pos = rdr.pos();
 				const auto bit = rdr.next();
-				const auto idx = (_pext_u64(pos, pos_mask) << ctx_bits) | _pext_u64(slider, ctx_mask);
+				const auto idx = context.extract(slider, pos);
 				slider = (slider << 1) | bit;
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
@@ -453,10 +489,7 @@ namespace compression {
 			std::uint64_t slider {}; // The sliding window
 			std::uint64_t outbound {};
 			std::uint64_t n_outbound {}; // How many bits of the outbound are pending
-			std::uint64_t ctx_mask {};
-			std::uint64_t pos_mask {};
-			std::uint64_t ctx_bits {};
-			std::uint64_t pos_bits {};
+			model_context context {0, 0};
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> encoded {};
 			bitreader rdr {};
@@ -631,15 +664,16 @@ int main()
 	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\src\\kernel.asm");
 
 	std::vector<compression::bit_model> models(1 << 16);
+	const compression::model_context ctx {0x3bf, 0x6};
 	// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest N
 	// bits of context, are the most important.
-	compression::encoder enc {blob, 0x3bf, 0x6, models, false};
+	compression::encoder enc {blob, ctx, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
 	const auto [encoded, n_bits] = enc.out();
 
-	compression::decoder dec {encoded, 0x3bf, 0x6, models, blob.size()};
+	compression::decoder dec {encoded, ctx, models, blob.size()};
 	dec.decode_all(n_bits);
 	dec.write("tapeout-rt.bin");
 
