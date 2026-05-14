@@ -14,12 +14,20 @@
 
 namespace compression {
 	namespace {
+		template <std::size_t a>
+		auto align(std::size_t n)
+		{
+			constexpr auto mask = a - 1;
+			const auto tail = n & mask;
+			return n + ((a - tail) & mask);
+		}
+
 		auto load_binary(gsl::czstring filename)
 		{
 			std::ifstream file {filename, std::ifstream::binary | std::ifstream::ate};
 			file.exceptions(file.failbit | file.badbit);
 			const auto size = file.tellg();
-			std::vector<unsigned char> buffer(size);
+			std::vector<unsigned char> buffer(align<sizeof(std::uint64_t)>(size));
 			void* const data_ptr = buffer.data();
 			file.seekg(file.beg);
 			file.read(static_cast<char*>(data_ptr), size);
@@ -61,13 +69,19 @@ namespace compression {
 			gsl::span<const unsigned char> bytes {};
 			std::uint64_t bitpos {};
 			std::uint64_t window {};
+			std::size_t n_words {};
 
 		public:
 			bitreader() = default;
 
-			bitreader(gsl::span<const unsigned char> bytes) : bytes {bytes}, bitpos {}, window {}
+			bitreader(gsl::span<const unsigned char> bytes) :
+				bytes {bytes},
+				bitpos {},
+				window {},
+				n_words {bytes.size() >> 3}
 			{
-				std::memcpy(&window, bytes.data(), sizeof(window));
+				Expects(bytes.size() % 8 == 0);
+				refill(0);
 			}
 
 			std::uint64_t pos() { return bitpos; }
@@ -78,15 +92,53 @@ namespace compression {
 				window <<= 1;
 				++bitpos;
 				if (!(bitpos & bitpos_mask)) {
-					const auto idx = bitpos >> 3;
-					if (idx != bytes.size())
-						std::memcpy(&window, &gsl::at(bytes, idx), sizeof(window));
+					const auto word_idx = bitpos >> 6;
+					refill(word_idx);
 				}
 
 				return b;
 			}
 
 			bool is_end() { return (bitpos >> 3) >= bytes.size(); }
+
+			void refill(std::size_t word_idx)
+			{
+				Expects(word_idx <= n_words);
+				if (word_idx == n_words) {
+					window = 0;
+					return;
+				}
+
+				const auto target = bytes.subspan(word_idx << 3, sizeof(window));
+				std::memcpy(&window, target.data(), sizeof(window));
+			}
+		};
+
+		// Needs finalization
+		class bitwriter {
+		public:
+			void emit(unsigned int bit)
+			{
+				queued <<= 1;
+				queued |= bit;
+				if (++pos & 63)
+					return;
+
+				const auto wordpos = (pos >> 6) - 1;
+				const auto bytepos = wordpos << 3;
+				const auto target = buffer.subspan(bytepos, sizeof(queued));
+				std::memcpy(target.data(), &queued, sizeof(queued));
+			}
+
+			void flush()
+			{
+				// const auto n_trailing =
+			}
+
+		private:
+			std::uint64_t queued {};
+			std::uint64_t pos {};
+			gsl::span<unsigned char> buffer {};
 		};
 
 		double bits_for_symbol(const bit_model& model, std::uint64_t bit)
@@ -245,32 +297,6 @@ namespace compression {
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> decoded {};
 			bitreader rdr {};
-		};
-
-		// Needs finalization
-		class bitwriter {
-		public:
-			void emit(unsigned int bit)
-			{
-				queued <<= 1;
-				queued |= bit;
-				++pos;
-				if (!(pos & 63)) {
-					const auto wordpos = (pos >> 6) - 1;
-					const auto bytepos = wordpos << 3;
-					std::memcpy(&buffer[bytepos], &queued, sizeof(queued));
-				}
-			}
-
-			void flush()
-			{
-				// const auto n_trailing =
-			}
-
-		private:
-			std::uint64_t queued {};
-			std::uint64_t pos {};
-			gsl::span<unsigned char> buffer {};
 		};
 
 		// This desparately needs unit-testing
