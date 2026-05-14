@@ -10,83 +10,10 @@
 
 #include <gsl/gsl>
 
+#include "uint128.h"
+
 namespace compression {
 	namespace {
-		struct uint128 {
-			std::uint64_t hi;
-			std::uint64_t lo;
-		};
-
-		bool operator==(const uint128& a, const uint128& b) { return a.hi == b.hi && a.lo == b.lo; }
-
-		uint128 shl(std::uint64_t v, unsigned int n)
-		{
-			if (n >= 64)
-				return {v << (n - 64), {}};
-
-			if (n == 0)
-				return {{}, v};
-
-			return {v >> (64 - n), v << n};
-		}
-
-		void add(uint128& dst, const uint128& src)
-		{
-			const auto old = dst.lo;
-			dst.lo += src.lo;
-			dst.hi += src.hi;
-			if (dst.lo < old)
-				++dst.hi;
-		}
-
-		void neg(uint128& dst)
-		{
-			constexpr std::uint64_t zero {};
-			dst.lo = ~dst.lo;
-			dst.hi = ~dst.hi;
-			add(dst, uint128 {{}, 1ull});
-		}
-
-		uint128 mul(std::uint64_t a, std::uint64_t b)
-		{
-			constexpr auto mask32 = (1ull << 32) - 1;
-			const auto a0 = a & mask32;
-			const auto b0 = b & mask32;
-			const auto a1 = a >> 32;
-			const auto b1 = b >> 32;
-
-			uint128 prod = shl(a0 * b0, 0);
-			add(prod, shl(a0 * b1, 32));
-			add(prod, shl(a1 * b0, 32));
-			add(prod, shl(a1 * b1, 64));
-
-			return prod;
-		}
-
-		bool lt(const uint128& a, const uint128& b) { return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo); }
-
-		bool lte(const uint128& a, const uint128& b) { return a == b || lt(a, b); }
-
-		// hi is quotient, lo is remainder
-		void div(uint128& n, std::uint64_t d)
-		{
-			std::uint64_t q {};
-			auto i = 63;
-			for (auto i = 63; i >= 0; --i) {
-				auto a = shl(d, i);
-				if (lte(a, n)) {
-					neg(a);
-					add(n, a);
-					q |= (1ull << i);
-				}
-			}
-
-			if (n.hi)
-				std::abort();
-
-			n.hi = q;
-		}
-
 		auto load_binary(gsl::czstring filename)
 		{
 			std::ifstream file {filename, std::ifstream::binary | std::ifstream::ate};
@@ -102,11 +29,6 @@ namespace compression {
 		struct bit_model {
 			std::uint64_t ones;
 			std::uint64_t total;
-		};
-
-		struct model {
-			std::uint64_t total;
-			std::vector<bit_model> weights;
 		};
 
 		class model_context {
@@ -167,61 +89,12 @@ namespace compression {
 			bool is_end() { return (bitpos >> 3) >= bytes.size(); }
 		};
 
-		double contribution(double pvalue)
-		{
-			const auto c = -pvalue * log2(pvalue);
-			return std::isnan(c) ? 0.0 : c;
-		}
-
 		double bits_for_symbol(const bit_model& model, std::uint64_t bit)
 		{
 			const auto ones = static_cast<double>(model.ones) / model.total;
 			const auto pvalue = bit ? ones : 1.0 - ones;
 			const auto bits = std::log2(pvalue);
 			return -bits;
-		}
-
-		double entropy(const bit_model& model)
-		{
-			const auto total = static_cast<double>(model.total);
-			const auto ones = static_cast<double>(model.ones) / total;
-			const auto zeroes = 1.0 - ones;
-			return contribution(ones) + contribution(zeroes);
-		}
-
-		double total_entropy(const model& model)
-		{
-			auto total = 0.0;
-			for (const auto& submodel : model.weights)
-				total += entropy(submodel) * submodel.total;
-
-			return total;
-		}
-
-		model get_stats(gsl::span<const unsigned char> bytes, std::uint64_t ctx_mask, std::uint64_t pos_mask)
-		{
-			bitreader rdr {bytes};
-			std::uint64_t window {};
-			std::uint64_t total {};
-			const auto ctx_bits = _mm_popcnt_u64(ctx_mask);
-			const auto pos_bits = _mm_popcnt_u64(pos_mask);
-			std::vector<bit_model> dist(1ull << (ctx_bits + pos_bits));
-			while (!rdr.is_end()) {
-				const auto ctx = _pext_u64(window, ctx_mask);
-				const auto pos = _pext_u64(total, pos_mask);
-				const auto idx = (pos << ctx_bits) | ctx;
-				const auto bit = rdr.next();
-				auto& model = gsl::at(dist, idx);
-				if (bit)
-					++model.ones;
-
-				++model.total;
-				window <<= 1;
-				window |= bit;
-				++total;
-			}
-
-			return {total, dist};
 		}
 
 		double
@@ -498,30 +371,6 @@ namespace compression {
 
 		constexpr auto mask_width = 128;
 
-		void bit_or(uint128& dst, const uint128& src)
-		{
-			dst.lo |= src.lo;
-			dst.hi |= src.hi;
-		}
-
-		void bit_and(uint128& dst, const uint128& src)
-		{
-			dst.lo &= src.lo;
-			dst.hi &= src.hi;
-		}
-
-		void bit_xor(uint128& dst, const uint128& src)
-		{
-			dst.lo ^= src.lo;
-			dst.hi ^= src.hi;
-		}
-
-		void bit_not(uint128& dst)
-		{
-			dst.lo = ~dst.lo;
-			dst.hi = ~dst.hi;
-		}
-
 		uint128 vary(std::mt19937& drbg, const uint128& mask)
 		{
 			std::uniform_int_distribution bit_dist {0, mask_width - 1};
@@ -558,8 +407,6 @@ namespace compression {
 			return value;
 		}
 
-		auto u128_popcnt(const uint128& src) { return _mm_popcnt_u64(src.hi) + _mm_popcnt_u64(src.lo); }
-
 		std::uint64_t evolve_for(gsl::span<const unsigned char> data)
 		{
 			constexpr auto elites = 32;
@@ -589,7 +436,7 @@ namespace compression {
 					if (a.second < b.second)
 						return true;
 
-					if (a.second == b.second && u128_popcnt(a.first) < u128_popcnt(b.first))
+					if (a.second == b.second && popcnt(a.first) < popcnt(b.first))
 						return true;
 
 					return false;
@@ -627,37 +474,27 @@ namespace compression {
 
 			return 0;
 		}
-
-		void for_mask(gsl::span<const unsigned char> blob, std::uint64_t ctx_mask, std::uint64_t pos_mask = {})
-		{
-			const auto stats = get_stats(blob, ctx_mask, pos_mask);
-			const auto total_percent = 100.0 * total_entropy(stats) / stats.total;
-
-			const model_context ctx {ctx_mask, pos_mask};
-			std::vector<bit_model> models(1ull << ctx.bits());
-			const auto running_percent = 100.0 * running_entropy(models, blob, ctx) / stats.total;
-
-			std::cout << std::format(
-				"{} %\t{} %\t{} %",
-				total_percent,
-				running_percent,
-				100.0 * running_percent / total_percent)
-					  << std::endl;
-		}
 	}
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	using namespace compression;
 
-	const auto blob = load_binary("C:\\Users\\david\\source\\silicon\\src\\kernel.asm");
+	const gsl::span args {argv, gsl::narrow<std::size_t>(argc)};
+	if (argc != 2) {
+		std::cerr << "Usage: compression <input file>" << std::endl;
+		return 1;
+	}
+
+	const auto blob = load_binary(args[1]);
 
 	std::vector<bit_model> models(1 << 16);
 	const model_context ctx {0x2ff, 0x6};
 	// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest N
 	// bits of context, are the most important.
-	encoder enc {blob, ctx, models, false}; // Bit count on the same file differed between release and debug??? Definitely UB somewhere.
+	// Bit count on the same file differed between release and debug??? Definitely UB somewhere.
+	encoder enc {blob, ctx, models, false};
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
