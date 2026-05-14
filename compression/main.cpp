@@ -117,6 +117,9 @@ namespace compression {
 		// Needs finalization
 		class bitwriter {
 		public:
+			bitwriter() = default;
+			bitwriter(gsl::span<unsigned char> buffer) : buffer {buffer} {}
+
 			void emit(unsigned int bit)
 			{
 				queued <<= 1;
@@ -125,20 +128,36 @@ namespace compression {
 					return;
 
 				const auto wordpos = (pos >> 6) - 1;
-				const auto bytepos = wordpos << 3;
-				const auto target = buffer.subspan(bytepos, sizeof(queued));
-				std::memcpy(target.data(), &queued, sizeof(queued));
+				push(wordpos);
 			}
 
 			void flush()
 			{
-				// const auto n_trailing =
+				const auto tail_bits = pos & bitpos_mask;
+				if (!tail_bits)
+					return; // Already flushed at the end of the last emit
+
+				const auto pad_bits = 64 - tail_bits;
+				const auto wordpos = pos >> 6; // No -1 needed since we're still in the middle of a word;
+				queued <<= pad_bits; // 0-pad
+				push(wordpos);
+				pos += pad_bits;
+
+				Ensures(((pos >> 3) & 7) == 0); // Must be quadword-aligned after flush
 			}
+
+			auto getpos() const noexcept { return pos; }
 
 		private:
 			std::uint64_t queued {};
 			std::uint64_t pos {};
 			gsl::span<unsigned char> buffer {};
+
+			void push(std::uint64_t word_idx)
+			{
+				const auto target = buffer.subspan(word_idx << 3, sizeof(queued));
+				std::memcpy(target.data(), &queued, sizeof(queued));
+			}
 		};
 
 		double bits_for_symbol(const bit_model& model, std::uint64_t bit)
@@ -272,12 +291,6 @@ namespace compression {
 					if (!(pos & 63))
 						std::memcpy(&gsl::at(decoded, ((pos >> 6) - 1) << 3), &slider, sizeof(slider));
 				}
-
-				/*const auto leftover_bits = pos & 63;
-				const auto bitpad = (8 - (leftover_bits & 7)) & 7;
-				const auto bytes = (leftover_bits + bitpad) >> 3;
-				slider <<= bitpad;
-				std::memcpy(&gsl::at(decoded, ((pos >> 6) - 1) << 3), &slider, bytes);*/
 			}
 
 			void write(gsl::czstring filename)
@@ -311,9 +324,11 @@ namespace compression {
 				bool dry_run) :
 				encoder {}
 			{
-				rdr = bitreader {input};
 				if (!dry_run)
 					encoded.resize(input.size());
+
+				rdr = bitreader {input};
+				wtr = bitwriter {encoded};
 
 				this->context = context;
 				this->models = models;
@@ -348,14 +363,9 @@ namespace compression {
 				rbound = bit ? lbound + split + 1 : rbound;
 
 				while ((~(lbound ^ rbound)) >> 63) {
-					outbound <<= 1;
-					outbound |= (lbound >> 63);
-					++n_outbound; // Throw away the output bits for now
+					wtr.emit(lbound >> 63);
 					lbound <<= 1;
 					rbound <<= 1;
-
-					if (!encoded.empty() && !(n_outbound & 63))
-						std::memcpy(&gsl::at(encoded, ((n_outbound >> 6) - 1) << 3), &outbound, sizeof(outbound));
 				}
 			}
 
@@ -364,34 +374,29 @@ namespace compression {
 				while (!rdr.is_end())
 					encode();
 
-				/*const auto leftover_bits = n_outbound & 63;
-				const auto bitpad = (64 - leftover_bits) & 63;
-				outbound <<= bitpad;
-				std::memcpy(&gsl::at(encoded, ((n_outbound >> 6) - 1) << 3), &outbound, sizeof(outbound));
-				n_outbound += bitpad;*/
+				wtr.flush();
 
-				return static_cast<double>(n_outbound) / rdr.pos();
+				return static_cast<double>(wtr.getpos()) / rdr.pos();
 			}
 
 			void write(gsl::czstring filename)
 			{
 				std::ofstream file {filename, std::ofstream::binary};
 				file.exceptions(file.badbit | file.failbit);
-				const auto bytes = n_outbound / 8;
-				file.write(reinterpret_cast<const char*>(encoded.data()), n_outbound % 8 ? bytes + 1 : bytes);
+				const auto bytes = wtr.getpos() >> 3;
+				file.write(reinterpret_cast<const char*>(encoded.data()), bytes);
 			}
 
-			std::pair<gsl::span<const unsigned char>, std::uint64_t> out() { return {encoded, n_outbound}; }
+			std::pair<gsl::span<const unsigned char>, std::uint64_t> out() { return {encoded, wtr.getpos()}; }
 
 		private:
 			std::uint64_t lbound {};
 			std::uint64_t rbound {~lbound};
 			std::uint64_t slider {}; // The sliding window
-			std::uint64_t outbound {};
-			std::uint64_t n_outbound {}; // How many bits of the outbound are pending
 			model_context context {0, 0};
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> encoded {};
+			bitwriter wtr {};
 			bitreader rdr {};
 		};
 
