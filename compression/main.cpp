@@ -31,7 +31,7 @@ namespace compression {
 			void* const data_ptr = buffer.data();
 			file.seekg(file.beg);
 			file.read(static_cast<char*>(data_ptr), size);
-			return buffer;
+			return std::make_pair(buffer, size);
 		}
 
 		struct bit_model {
@@ -84,10 +84,11 @@ namespace compression {
 				refill(0);
 			}
 
-			std::uint64_t pos() { return bitpos; }
+			std::uint64_t pos() const { return bitpos; }
 
 			std::uint64_t next()
 			{
+				Expects(!is_end());
 				const auto b = window >> 63;
 				window <<= 1;
 				++bitpos;
@@ -139,7 +140,7 @@ namespace compression {
 
 				const auto pad_bits = 64 - tail_bits;
 				const auto wordpos = pos >> 6; // No -1 needed since we're still in the middle of a word;
-				queued <<= pad_bits; // 0-pad
+				queued <<= pad_bits;
 				push(wordpos);
 				pos += pad_bits;
 
@@ -276,28 +277,29 @@ namespace compression {
 				++n_inbound;
 			}
 
-			void decode_all(std::uint64_t n_bits)
+			void decode_all(std::uint64_t, std::uint64_t expected_bits)
 			{
 				for (auto i = 0; i < 64; ++i)
 					nextbit();
 
 				std::uint64_t pos {};
-				while (n_inbound < n_bits) {
-					if (n_bits - n_inbound < 64) {
-						std::cout << n_bits << " " << n_inbound << std::endl;
-					}
-
+				const gsl::span root_span {decoded};
+				while (pos < expected_bits) {
 					decode(pos++);
-					if (!(pos & 63))
-						std::memcpy(&gsl::at(decoded, ((pos >> 6) - 1) << 3), &slider, sizeof(slider));
+					if (!(pos & 63)) {
+						const auto wordpos = (pos >> 6) - 1;
+						const auto target = root_span.subspan(wordpos << 3, sizeof(slider));
+						std::memcpy(target.data(), &slider, sizeof(slider));
+					}
 				}
 			}
 
-			void write(gsl::czstring filename)
+			void write(gsl::czstring filename, std::size_t actual_size)
 			{
 				std::ofstream file {filename, std::ofstream::binary};
 				file.exceptions(file.badbit | file.failbit);
-				file.write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+				const auto valid_bytes = gsl::span {decoded}.subspan(0, actual_size);
+				file.write(reinterpret_cast<const char*>(valid_bytes.data()), valid_bytes.size());
 			}
 
 		private:
@@ -339,10 +341,8 @@ namespace compression {
 			}
 
 			// One bit only!
-			void encode()
+			void encode(std::uint64_t bit)
 			{
-				const auto pos = rdr.pos();
-				const auto bit = rdr.next();
 				const auto idx = context.extract(slider, pos);
 				slider = (slider << 1) | bit;
 				auto& model = gsl::at(models, idx);
@@ -371,8 +371,16 @@ namespace compression {
 
 			double encode_all()
 			{
-				while (!rdr.is_end())
-					encode();
+				while (!rdr.is_end()) {
+					encode(rdr.next());
+					++pos;
+				}
+
+				encode(0);
+				for (auto i = 0; i < 64; ++i) {
+					wtr.emit(lbound >> 63);
+					lbound <<= 1;
+				}
 
 				wtr.flush();
 
@@ -393,6 +401,7 @@ namespace compression {
 			std::uint64_t lbound {};
 			std::uint64_t rbound {~lbound};
 			std::uint64_t slider {}; // The sliding window
+			std::uint64_t pos {};
 			model_context context {0, 0};
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> encoded {};
@@ -417,7 +426,7 @@ namespace compression {
 		}
 
 		constexpr auto mask_width = 128;
-		constexpr auto maxbits = 11;
+		constexpr auto maxbits = 20;
 
 		uint128 draw(std::mt19937& drbg)
 		{
@@ -517,7 +526,7 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	const auto blob = load_binary(args[1]);
+	const auto [blob, raw_size] = load_binary(args[1]);
 
 	std::vector<bit_model> models(1 << 16);
 	const model_context ctx {0x2ff, 0x6};
@@ -531,8 +540,8 @@ int main(int argc, char** argv)
 	const auto [encoded, n_bits] = enc.out();
 
 	decoder dec {encoded, ctx, models, blob.size()};
-	dec.decode_all(n_bits);
-	dec.write("tapeout-rt.bin");
+	dec.decode_all(n_bits, blob.size() << 3);
+	dec.write("tapeout-rt.bin", raw_size);
 
 	evolve_for(blob);
 }
