@@ -109,6 +109,28 @@ namespace compression {
 			std::vector<bit_model> weights;
 		};
 
+		class model_context {
+		public:
+			model_context(std::uint64_t ctx_mask, std::uint64_t pos_mask) noexcept :
+				ctx_mask {ctx_mask},
+				pos_mask {pos_mask},
+				ctx_bits {gsl::narrow<unsigned int>(_mm_popcnt_u64(ctx_mask))}
+			{
+			}
+
+			std::uint64_t extract(std::uint64_t nearbits, std::uint64_t bitpos) const noexcept
+			{
+				return (_pext_u64(bitpos, pos_mask) << ctx_bits) | _pext_u64(nearbits, ctx_mask);
+			}
+
+			std::uint64_t bits() const noexcept { return ctx_bits + _mm_popcnt_u64(pos_mask); }
+
+		private:
+			std::uint64_t ctx_mask;
+			std::uint64_t pos_mask;
+			unsigned int ctx_bits;
+		};
+
 		constexpr auto bitpos_mask = 63ull;
 
 		// Reads off the leftmost bit
@@ -202,13 +224,9 @@ namespace compression {
 			return {total, dist};
 		}
 
-		double running_entropy(
-			gsl::span<bit_model> dist,
-			gsl::span<const unsigned char> bytes,
-			std::uint64_t ctx_mask,
-			std::uint64_t pos_mask = {})
+		double
+		running_entropy(gsl::span<bit_model> dist, gsl::span<const unsigned char> bytes, const model_context& ctx)
 		{
-			const auto ctx_bits = _mm_popcnt_u64(ctx_mask);
 			bitreader rdr {bytes};
 			std::uint64_t window {};
 			std::uint64_t total {};
@@ -219,9 +237,7 @@ namespace compression {
 
 			auto e_total = 0.0;
 			while (!rdr.is_end()) {
-				const auto ctx = _pext_u64(window, ctx_mask);
-				const auto pos = _pext_u64(total, pos_mask);
-				const auto idx = (pos << ctx_bits) | ctx;
+				const auto idx = ctx.extract(window, total);
 				const auto bit = rdr.next();
 				auto& model = gsl::at(dist, idx);
 				e_total += bits_for_symbol(model, bit);
@@ -255,26 +271,6 @@ namespace compression {
 			- Every time 64 bits have been added to the encoding queue, we write the entire queue out. The last queue
 				will need to be zero-padded. This can be done by the head of the decompressed code.
 		*/
-
-		class model_context {
-		public:
-			model_context(std::uint64_t ctx_mask, std::uint64_t pos_mask) noexcept :
-				ctx_mask {ctx_mask},
-				pos_mask {pos_mask},
-				ctx_bits {gsl::narrow<unsigned int>(_mm_popcnt_u64(ctx_mask))}
-			{
-			}
-
-			std::uint64_t extract(std::uint64_t nearbits, std::uint64_t bitpos) const noexcept
-			{
-				return (_pext_u64(bitpos, pos_mask) << ctx_bits) | _pext_u64(nearbits, ctx_mask);
-			}
-
-		private:
-			std::uint64_t ctx_mask;
-			std::uint64_t pos_mask;
-			unsigned int ctx_bits;
-		};
 
 		class decoder {
 		public:
@@ -343,6 +339,10 @@ namespace compression {
 
 				std::uint64_t pos {};
 				while (n_inbound < n_bits) {
+					if (n_bits - n_inbound < 64) {
+						std::cout << n_bits << " " << n_inbound << std::endl;
+					}
+
 					decode(pos++);
 					if (!(pos & 63))
 						std::memcpy(&gsl::at(decoded, ((pos >> 6) - 1) << 3), &slider, sizeof(slider));
@@ -389,8 +389,9 @@ namespace compression {
 				}
 			}
 
-			void flush() {
-				const auto n_trailing = 
+			void flush()
+			{
+				// const auto n_trailing =
 			}
 
 		private:
@@ -571,22 +572,17 @@ namespace compression {
 
 			const auto actual_bits = data.size() * 8;
 			std::vector<bit_model> models(1ull << maxbits);
+			const gsl::span<bit_model> root_span {models};
 			for (auto i = 0; i < 512; ++i) {
 				for (auto& [mask, score] : pool) {
-					const auto ctx_mask = mask.lo;
-					const auto pos_mask = mask.hi;
-					const auto popcnt = _mm_popcnt_u64(ctx_mask) + _mm_popcnt_u64(pos_mask);
+					const model_context ctx {mask.lo, mask.hi};
+					const auto popcnt = ctx.bits();
 					if (popcnt <= maxbits) {
-						score = running_entropy(
-									gsl::span {models}.subspan(0, gsl::narrow_cast<std::size_t>(1ull << popcnt)),
-									data,
-									ctx_mask,
-									pos_mask)
-							/ actual_bits;
+						const auto model_span = root_span.subspan(0, 1ull << popcnt);
+						score = running_entropy(model_span, data, ctx) / actual_bits;
 					}
-					else {
+					else
 						score = static_cast<double>(actual_bits) + 1.0;
-					}
 				}
 
 				std::sort(pool.begin(), pool.end(), [](auto&& a, auto&& b) {
@@ -634,12 +630,12 @@ namespace compression {
 
 		void for_mask(gsl::span<const unsigned char> blob, std::uint64_t ctx_mask, std::uint64_t pos_mask = {})
 		{
-			const auto stats = compression::get_stats(blob, ctx_mask, pos_mask);
-			const auto total_percent = 100.0 * compression::total_entropy(stats) / stats.total;
+			const auto stats = get_stats(blob, ctx_mask, pos_mask);
+			const auto total_percent = 100.0 * total_entropy(stats) / stats.total;
 
-			std::vector<bit_model> models(1ull << (_mm_popcnt_u64(ctx_mask) + _mm_popcnt_u64(pos_mask)));
-			const auto running_percent
-				= 100.0 * compression::running_entropy(models, blob, ctx_mask, pos_mask) / stats.total;
+			const model_context ctx {ctx_mask, pos_mask};
+			std::vector<bit_model> models(1ull << ctx.bits());
+			const auto running_percent = 100.0 * running_entropy(models, blob, ctx) / stats.total;
 
 			std::cout << std::format(
 				"{} %\t{} %\t{} %",
@@ -653,29 +649,23 @@ namespace compression {
 
 int main()
 {
-	const auto result = compression::mul(0xdeadbeefcafebabeull, 0xdeadbeefcafebabeull);
-	std::cout << result.hi << " " << result.lo << std::endl;
+	using namespace compression;
 
-	const auto max = ~std::uint64_t {};
-	auto maxprod = compression::mul(max, max);
-	compression::div(maxprod, max);
-	std::cout << maxprod.hi << " " << maxprod.lo << std::endl;
+	const auto blob = load_binary("C:\\Users\\david\\source\\silicon\\src\\kernel.asm");
 
-	const auto blob = compression::load_binary("C:\\Users\\david\\source\\silicon\\src\\kernel.asm");
-
-	std::vector<compression::bit_model> models(1 << 16);
-	const compression::model_context ctx {0x3bf, 0x6};
+	std::vector<bit_model> models(1 << 16);
+	const model_context ctx {0x2ff, 0x6};
 	// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest N
 	// bits of context, are the most important.
-	compression::encoder enc {blob, ctx, models, false};
+	encoder enc {blob, ctx, models, false}; // Bit count on the same file differed between release and debug??? Definitely UB somewhere.
 	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
 	enc.write("tapeout.bin");
 	const auto [encoded, n_bits] = enc.out();
 
-	compression::decoder dec {encoded, ctx, models, blob.size()};
+	decoder dec {encoded, ctx, models, blob.size()};
 	dec.decode_all(n_bits);
 	dec.write("tapeout-rt.bin");
 
-	compression::evolve_for(blob);
+	evolve_for(blob);
 }
