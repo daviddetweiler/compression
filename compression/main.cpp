@@ -369,11 +369,8 @@ namespace compression {
 			bitreader rdr {};
 		};
 
-		constexpr auto mask_width = 128;
-
-		uint128 vary(std::mt19937& drbg, const uint128& mask)
+		uint128 vary(std::mt19937& drbg, std::uniform_int_distribution<int>& bit_dist, const uint128& mask)
 		{
-			std::uniform_int_distribution bit_dist {0, mask_width - 1};
 			const auto bit = bit_dist(drbg);
 			const auto select = shl(1ull, bit);
 			auto extract = mask;
@@ -388,6 +385,7 @@ namespace compression {
 			return result; // Flip the bit
 		}
 
+		constexpr auto mask_width = 128;
 		constexpr auto maxbits = 11;
 
 		uint128 draw(std::mt19937& drbg)
@@ -413,6 +411,8 @@ namespace compression {
 			constexpr auto relatives = 32;
 			static_assert(elites <= relatives, "you're biasing the distribution");
 			std::mt19937 drbg {0xdeadbeef};
+			std::bernoulli_distribution coin {0.5};
+			std::uniform_int_distribution bit_dist {0, mask_width - 1};
 			std::vector<std::pair<uint128, double>> pool(elites * relatives);
 			for (auto& gene : pool)
 				gene.first = draw(drbg);
@@ -462,10 +462,9 @@ namespace compression {
 					const auto off = j * relatives;
 					const auto& mask = gsl::at(pool, off);
 					for (auto jp = 1; jp < relatives; ++jp) {
-						std::bernoulli_distribution coin {0.5};
-						auto newmask = vary(drbg, mask.first);
+						auto newmask = vary(drbg, bit_dist, mask.first);
 						for (auto retry = 0; retry < mask_width && coin(drbg); ++retry)
-							newmask = vary(drbg, newmask);
+							newmask = vary(drbg, bit_dist, newmask);
 
 						gsl::at(pool, off + jp).first = newmask;
 					}

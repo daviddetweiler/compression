@@ -33,7 +33,6 @@ namespace compression {
 
 	inline void neg(uint128& dst)
 	{
-		constexpr std::uint64_t zero {};
 		dst.lo = ~dst.lo;
 		dst.hi = ~dst.hi;
 		add(dst, uint128 {{}, 1ull});
@@ -63,7 +62,6 @@ namespace compression {
 	inline void div(uint128& n, std::uint64_t d)
 	{
 		std::uint64_t q {};
-		auto i = 63;
 		for (auto i = 63; i >= 0; --i) {
 			auto a = shl(d, i);
 			if (lte(a, n)) {
