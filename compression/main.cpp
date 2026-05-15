@@ -241,7 +241,7 @@ namespace compression {
 
 			void decode(std::uint64_t pos)
 			{
-				if (pos == 11)
+				if (pos == 68)
 					__debugbreak();
 
 				const auto idx = context.extract(slider, pos);
@@ -274,13 +274,16 @@ namespace compression {
 						rbound <<= 1;
 						nextbit();
 					}
-					else if (lbound >> 61 == 0b011 && rbound >> 61 == 0b100) {
-						trace << "prune" << std::endl;
+					else if (lbound >> 62 == 0b01 && rbound >> 62 == 0b10) {
+						trace << pos << " prune" << std::endl;
 						lbound <<= 1;
 						lbound &= ~(1ull << 63);
 						rbound <<= 1;
 						rbound |= 1ull << 63;
-						inbound = (inbound << 1) | (inbound & (1ull << 63)); // Discard trailer bit
+
+						const auto hibit = inbound & (1ull << 63);
+						nextbit();
+						inbound |= hibit;
 					}
 					else {
 						break;
@@ -290,6 +293,8 @@ namespace compression {
 
 			void nextbit()
 			{
+				if (n_inbound >= 64)
+					trace << n_inbound - 64 << " next " << (inbound >> 63) << std::endl;
 				inbound <<= 1;
 				inbound |= rdr.next();
 				++n_inbound;
@@ -303,9 +308,10 @@ namespace compression {
 				std::uint64_t pos {};
 				const gsl::span root_span {decoded};
 				while (pos < expected_bits) {
-					decode(pos++);
+					decode(pos);
 					const auto bit = slider & 1;
-					trace << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
+					trace << pos << ',' << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
+					++pos;
 					if (!(pos & 63)) {
 						const auto wordpos = (pos >> 6) - 1;
 						const auto target = root_span.subspan(wordpos << 3, sizeof(slider));
@@ -364,7 +370,7 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				if (pos == 11)
+				if (pos == 68)
 					__debugbreak();
 
 				const auto idx = context.extract(slider, pos);
@@ -392,16 +398,19 @@ namespace compression {
 				while (true) {
 					if (!((lbound ^ rbound) >> 63)) {
 						const auto ebit = lbound >> 63;
+						trace << wtr.getpos() << " next " << ebit << std::endl;
 						wtr.emit(ebit);
 						lbound <<= 1;
 						rbound <<= 1;
-						for (auto i = 0ull; i < n_trailers; ++i)
+						for (auto i = 0ull; i < n_trailers; ++i) {
+							trace << wtr.getpos() << " next " << !ebit << std::endl;
 							wtr.emit(!ebit); // Bitwise not would thrash the upper bits
+						}
 
 						n_trailers = 0;
 					}
-					else if (lbound >> 61 == 0b011 && rbound >> 61 == 0b100) {
-						trace << "prune" << std::endl;
+					else if (lbound >> 62 == 0b01 && rbound >> 62 == 0b10) {
+						trace << pos << " prune" << std::endl;
 						// Congratulations, we have the 0b0111... 0b1000... case
 						lbound <<= 1;
 						lbound &= ~(1ull << 63);
@@ -420,7 +429,7 @@ namespace compression {
 				while (!rdr.is_end()) {
 					const auto bit = rdr.next();
 					encode(bit);
-					trace << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
+					trace << pos << ',' << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
 					++pos;
 				}
 
