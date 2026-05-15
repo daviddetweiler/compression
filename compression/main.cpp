@@ -86,6 +86,8 @@ namespace compression {
 
 			std::uint64_t pos() const { return bitpos; }
 
+			std::uint64_t expected() const { return bytes.size() << 3; }
+
 			std::uint64_t next()
 			{
 				Expects(!is_end());
@@ -286,6 +288,8 @@ namespace compression {
 				const gsl::span root_span {decoded};
 				while (pos < expected_bits) {
 					decode(pos++);
+					const auto bit = slider & 1;
+					trace << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
 					if (!(pos & 63)) {
 						const auto wordpos = (pos >> 6) - 1;
 						const auto target = root_span.subspan(wordpos << 3, sizeof(slider));
@@ -312,6 +316,7 @@ namespace compression {
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> decoded {};
 			bitreader rdr {};
+			std::ofstream trace {"decode.csv"};
 		};
 
 		// This desparately needs unit-testing
@@ -327,7 +332,7 @@ namespace compression {
 				encoder {}
 			{
 				if (!dry_run)
-					encoded.resize(input.size());
+					encoded.resize(input.size() + 8);
 
 				rdr = bitreader {input};
 				wtr = bitwriter {encoded};
@@ -354,7 +359,7 @@ namespace compression {
 				// Clamping to ensure we always predict nonzero probability for each symbol
 				split = split == rwidth ? split - 1 : split;
 				split = split == 0 ? split + 1 : split;
-				model.ones += gsl::narrow_cast<std::uint32_t>(bit);
+				model.ones += bit;
 				++model.total;
 
 				// what happens when the range collapses hmmmmmmmmm
@@ -372,11 +377,16 @@ namespace compression {
 			double encode_all()
 			{
 				while (!rdr.is_end()) {
-					encode(rdr.next());
+					const auto bit = rdr.next();
+					encode(bit);
+					trace << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
 					++pos;
 				}
 
-				encode(0);
+				// We must force the choice of some number in the middle of the final range
+				// Picking lbound the last bit is always 1 for some reason
+				// Picking rbound does things I don't understand.
+				// encode(0);
 				for (auto i = 0; i < 64; ++i) {
 					wtr.emit(lbound >> 63);
 					lbound <<= 1;
@@ -407,6 +417,7 @@ namespace compression {
 			std::vector<unsigned char> encoded {};
 			bitwriter wtr {};
 			bitreader rdr {};
+			std::ofstream trace {"encode.csv"};
 		};
 
 		uint128 vary(std::mt19937& drbg, std::uniform_int_distribution<int>& bit_dist, const uint128& mask)
@@ -528,20 +539,21 @@ int main(int argc, char** argv)
 
 	const auto [blob, raw_size] = load_binary(args[1]);
 
-	std::vector<bit_model> models(1 << 16);
-	const model_context ctx {0x2ff, 0x6};
-	// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest N
-	// bits of context, are the most important.
-	// Bit count on the same file differed between release and debug??? Definitely UB somewhere.
-	encoder enc {blob, ctx, models, false};
-	std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
+	{
+		std::vector<bit_model> models(1 << 20);
+		const model_context ctx {0xffff, 0x7};
+		// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest
+		// N bits of context, are the most important.
+		encoder enc {blob, ctx, models, false};
+		std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
-	enc.write("tapeout.bin");
-	const auto [encoded, n_bits] = enc.out();
+		enc.write("tapeout.bin");
+		const auto [encoded, n_bits] = enc.out();
 
-	decoder dec {encoded, ctx, models, blob.size()};
-	dec.decode_all(n_bits, blob.size() << 3);
-	dec.write("tapeout-rt.bin", raw_size);
+		decoder dec {encoded, ctx, models, blob.size()};
+		dec.decode_all(n_bits, blob.size() << 3);
+		dec.write("tapeout-rt.bin", raw_size);
+	}
 
-	evolve_for(blob);
+	//evolve_for(blob);
 }
