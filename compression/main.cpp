@@ -123,7 +123,7 @@ namespace compression {
 			bitwriter() = default;
 			bitwriter(gsl::span<unsigned char> buffer) : buffer {buffer} {}
 
-			void emit(unsigned int bit)
+			void emit(std::uint64_t bit)
 			{
 				queued <<= 1;
 				queued |= bit;
@@ -241,6 +241,9 @@ namespace compression {
 
 			void decode(std::uint64_t pos)
 			{
+				if (pos == 11)
+					__debugbreak();
+
 				const auto idx = context.extract(slider, pos);
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
@@ -265,10 +268,23 @@ namespace compression {
 				lbound = bit ? lbound : lbound + split + 1;
 				rbound = bit ? lbound + split : rbound;
 
-				while ((~(lbound ^ rbound)) >> 63) {
-					lbound <<= 1;
-					rbound <<= 1;
-					nextbit();
+				while (true) {
+					if (!((lbound ^ rbound) >> 63)) {
+						lbound <<= 1;
+						rbound <<= 1;
+						nextbit();
+					}
+					else if (lbound >> 61 == 0b011 && rbound >> 61 == 0b100) {
+						trace << "prune" << std::endl;
+						lbound <<= 1;
+						lbound &= ~(1ull << 63);
+						rbound <<= 1;
+						rbound |= 1ull << 63;
+						inbound = (inbound << 1) | (inbound & (1ull << 63)); // Discard trailer bit
+					}
+					else {
+						break;
+					}
 				}
 			}
 
@@ -348,6 +364,9 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
+				if (pos == 11)
+					__debugbreak();
+
 				const auto idx = context.extract(slider, pos);
 				slider = (slider << 1) | bit;
 				auto& model = gsl::at(models, idx);
@@ -357,6 +376,9 @@ namespace compression {
 				div(tmp, model.total); // Throw away the remainder for now
 				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
 				// Clamping to ensure we always predict nonzero probability for each symbol
+				// Of note: numbers in the range (split, split + 1) will never be generated and have no meaning
+				// Only way to fix this would be to make the intervals half-open, but that would probably mean making
+				// 0 an illegal value.
 				split = split == rwidth ? split - 1 : split;
 				split = split == 0 ? split + 1 : split;
 				model.ones += bit;
@@ -367,10 +389,29 @@ namespace compression {
 				lbound = bit ? lbound : lbound + split + 1;
 				rbound = bit ? lbound + split : rbound;
 
-				while ((~(lbound ^ rbound)) >> 63) {
-					wtr.emit(lbound >> 63);
-					lbound <<= 1;
-					rbound <<= 1;
+				while (true) {
+					if (!((lbound ^ rbound) >> 63)) {
+						const auto ebit = lbound >> 63;
+						wtr.emit(ebit);
+						lbound <<= 1;
+						rbound <<= 1;
+						for (auto i = 0ull; i < n_trailers; ++i)
+							wtr.emit(!ebit); // Bitwise not would thrash the upper bits
+
+						n_trailers = 0;
+					}
+					else if (lbound >> 61 == 0b011 && rbound >> 61 == 0b100) {
+						trace << "prune" << std::endl;
+						// Congratulations, we have the 0b0111... 0b1000... case
+						lbound <<= 1;
+						lbound &= ~(1ull << 63);
+						rbound <<= 1;
+						rbound |= 1ull << 63;
+						++n_trailers;
+					}
+					else {
+						break;
+					}
 				}
 			}
 
@@ -404,6 +445,7 @@ namespace compression {
 			std::uint64_t rbound {~lbound};
 			std::uint64_t slider {}; // The sliding window
 			std::uint64_t pos {};
+			std::uint64_t n_trailers {};
 			model_context context {0, 0};
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> encoded {};
