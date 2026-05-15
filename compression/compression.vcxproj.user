@@ -6,8 +6,8 @@
     <LocalDebuggerCommandArgumentsHistory>C:\Users\david\source\compression\sompression\main.cpp|C:\Users\david\source\compression\one-byte.txt|C:\Users\david\source\silicon\scripts\core.si|C:\Users\david\source\compression\compression\main.cpp|C:\Users\david\source\silicon\src\kernel.asm|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LocalDebuggerCommandArguments>C:\Users\david\source\silicon\out\kernel.bin</LocalDebuggerCommandArguments>
-    <LocalDebuggerCommandArgumentsHistory>C:\Users\david\source\silicon\out\kernel.bin.lzss|C:\Users\david\source\compression\x64\Release\compression.exe|C:\Users\david\source\compression\compression\main.cpp|C:\Users\david\source\silicon\src\kernel.asm|C:\Users\david\source\silicon\out\kernel.bin|</LocalDebuggerCommandArgumentsHistory>
+    <LocalDebuggerCommandArguments>C:\Users\david\source\silicon\src\kernel.asm</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArgumentsHistory>C:\Users\david\source\silicon\out\kernel.bin.lzss|C:\Users\david\source\compression\x64\Release\compression.exe|C:\Users\david\source\compression\compression\main.cpp|C:\Users\david\source\silicon\out\kernel.bin|C:\Users\david\source\silicon\src\kernel.asm|</LocalDebuggerCommandArgumentsHistory>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
 </Project>

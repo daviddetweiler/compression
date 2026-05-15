@@ -262,8 +262,8 @@ namespace compression {
 				model.ones += bit;
 				++model.total;
 
-				lbound = bit ? lbound : lbound + split;
-				rbound = bit ? lbound + split + 1 : rbound;
+				lbound = bit ? lbound : lbound + split + 1;
+				rbound = bit ? lbound + split : rbound;
 
 				while ((~(lbound ^ rbound)) >> 63) {
 					lbound <<= 1;
@@ -364,8 +364,8 @@ namespace compression {
 
 				// what happens when the range collapses hmmmmmmmmm
 				// I.e. what if the distribution predicts zero probability for 0?
-				lbound = bit ? lbound : lbound + split;
-				rbound = bit ? lbound + split + 1 : rbound;
+				lbound = bit ? lbound : lbound + split + 1;
+				rbound = bit ? lbound + split : rbound;
 
 				while ((~(lbound ^ rbound)) >> 63) {
 					wtr.emit(lbound >> 63);
@@ -383,15 +383,7 @@ namespace compression {
 					++pos;
 				}
 
-				// We must force the choice of some number in the middle of the final range
-				// Picking lbound the last bit is always 1 for some reason
-				// Picking rbound does things I don't understand.
-				// encode(0);
-				for (auto i = 0; i < 64; ++i) {
-					wtr.emit(lbound >> 63);
-					lbound <<= 1;
-				}
-
+				wtr.emit(rbound >> 63);
 				wtr.flush();
 
 				return static_cast<double>(wtr.getpos()) / rdr.pos();
@@ -555,5 +547,5 @@ int main(int argc, char** argv)
 		dec.write("tapeout-rt.bin", raw_size);
 	}
 
-	//evolve_for(blob);
+	// evolve_for(blob);
 }
