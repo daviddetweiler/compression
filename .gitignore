@@ -10,5 +10,5 @@
 /x64/Release
 *.bw
 *.bin
-/compression/decode.csv
-/compression/encode.csv
+*.csv
+/compression/compression.vcxproj.user

@@ -547,5 +547,5 @@ int main(int argc, char** argv)
 		dec.write("tapeout-rt.bin", raw_size);
 	}
 
-	// evolve_for(blob);
+	evolve_for(blob);
 }
