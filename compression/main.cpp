@@ -253,14 +253,14 @@ namespace compression {
 
 				const auto divider = lbound + split;
 				// Window's bit-reversed, that's why it's acting weird
-				const auto bit = inbound <= divider ? 1 : 0;
+				const auto bit = inbound < divider ? 1 : 0;
 				slider <<= 1;
 				slider |= bit;
 
 				model.ones += bit;
 				++model.total;
 
-				lbound = bit ? lbound : lbound + split + 1;
+				lbound = bit ? lbound : lbound + split;
 				rbound = bit ? lbound + split : rbound;
 
 				while (true) {
@@ -378,7 +378,7 @@ namespace compression {
 
 				// what happens when the range collapses hmmmmmmmmm
 				// I.e. what if the distribution predicts zero probability for 0?
-				lbound = bit ? lbound : lbound + split + 1;
+				lbound = bit ? lbound : lbound + split;
 				rbound = bit ? lbound + split : rbound;
 
 				while (true) {
