@@ -241,14 +241,9 @@ namespace compression {
 
 			void decode(std::uint64_t pos)
 			{
-				if (pos == 67)
-					__debugbreak();
-
 				const auto idx = context.extract(slider, pos);
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
-				Expects(rwidth > 1);
-
 				auto tmp = mul(rwidth, model.ones);
 				div(tmp, model.total); // Throw away the remainder for now
 				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
@@ -269,15 +264,12 @@ namespace compression {
 				rbound = bit ? lbound + split : rbound;
 
 				while (true) {
-					Expects(inbound >= lbound && inbound <= rbound);
-
 					if (!((lbound ^ rbound) >> 63)) {
 						lbound <<= 1;
 						rbound <<= 1;
 						nextbit();
 					}
 					else if ((lbound >> 62) == 0b01 && (rbound >> 62) == 0b10) {
-						trace << pos << " prune" << std::endl;
 						lbound <<= 1;
 						lbound &= ~(1ull << 63);
 						rbound <<= 1;
@@ -291,16 +283,11 @@ namespace compression {
 					else {
 						break;
 					}
-
-					// I knew it. Bit 67, the bit before the traces diverge on bit 68
-					Ensures(inbound >= lbound && inbound <= rbound);
 				}
 			}
 
 			void nextbit()
 			{
-				if (n_inbound >= 64)
-					trace << n_inbound - 64 << " next " << (inbound >> 63) << std::endl;
 				inbound <<= 1;
 				inbound |= rdr.next();
 				++n_inbound;
@@ -315,8 +302,6 @@ namespace compression {
 				const gsl::span root_span {decoded};
 				while (pos < expected_bits) {
 					decode(pos);
-					const auto bit = slider & 1;
-					trace << pos << ',' << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
 					++pos;
 					if (!(pos & 63)) {
 						const auto wordpos = (pos >> 6) - 1;
@@ -344,7 +329,6 @@ namespace compression {
 			gsl::span<bit_model> models {};
 			std::vector<unsigned char> decoded {};
 			bitreader rdr {};
-			std::ofstream trace {"decode.csv"};
 		};
 
 		// This desparately needs unit-testing
@@ -376,14 +360,10 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				if (pos == 67)
-					__debugbreak();
-
 				const auto idx = context.extract(slider, pos);
 				slider = (slider << 1) | bit;
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
-				Expects(rwidth > 1);
 				auto tmp = mul(rwidth, model.ones);
 				div(tmp, model.total); // Throw away the remainder for now
 				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
@@ -404,19 +384,15 @@ namespace compression {
 				while (true) {
 					if (!((lbound ^ rbound) >> 63)) {
 						const auto ebit = lbound >> 63;
-						trace << wtr.getpos() << " next " << ebit << std::endl;
 						wtr.emit(ebit);
 						lbound <<= 1;
 						rbound <<= 1;
-						for (auto i = 0ull; i < n_trailers; ++i) {
-							trace << wtr.getpos() << " next " << !ebit << std::endl;
+						for (auto i = 0ull; i < n_trailers; ++i)
 							wtr.emit(!ebit); // Bitwise not would thrash the upper bits
-						}
 
 						n_trailers = 0;
 					}
 					else if ((lbound >> 62) == 0b01 && (rbound >> 62) == 0b10) {
-						trace << pos << " prune" << std::endl;
 						// Congratulations, we have the 0b0111... 0b1000... case
 						lbound <<= 1;
 						lbound &= ~(1ull << 63);
@@ -435,7 +411,6 @@ namespace compression {
 				while (!rdr.is_end()) {
 					const auto bit = rdr.next();
 					encode(bit);
-					trace << pos << ',' << lbound << ',' << rbound << ',' << slider << ',' << bit << '\n';
 					++pos;
 				}
 
@@ -466,7 +441,6 @@ namespace compression {
 			std::vector<unsigned char> encoded {};
 			bitwriter wtr {};
 			bitreader rdr {};
-			std::ofstream trace {"encode.csv"};
 		};
 
 		uint128 vary(std::mt19937& drbg, std::uniform_int_distribution<int>& bit_dist, const uint128& mask)
