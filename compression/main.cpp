@@ -55,7 +55,6 @@ namespace compression {
 
 			std::uint64_t bits() const noexcept { return ctx_bits + _mm_popcnt_u64(pos_mask); }
 
-		private:
 			std::uint64_t ctx_mask;
 			std::uint64_t pos_mask;
 			unsigned int ctx_bits;
@@ -327,6 +326,23 @@ namespace compression {
 			bitreader rdr {};
 		};
 
+		// This is for assembly-language encoding
+		struct encoder_state {
+			std::uint64_t lbound; // +0
+			std::uint64_t rbound; // +8
+			std::uint64_t ctx_mask; // +16
+			std::uint64_t pos_mask; // +24
+			std::uint64_t ctx; // +32
+			std::uint64_t pos; // +40
+			std::uint64_t outbound; // +48
+			std::uint64_t n_outbound; // +56 Encoding shift-out MUST stop every time we get to the next 64-bit block
+			std::uint64_t n_trailing; // +64
+			bit_model* models; // +72
+			std::uint64_t* output_words; // +80
+		};
+
+		extern "C" std::uint64_t get_subrange(encoder_state* state, std::uint64_t bit);
+
 		// This desparately needs unit-testing
 		// And testing how closely the entropy estimation tracks the encoder (same final model states)
 		class encoder {
@@ -356,19 +372,16 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				const auto idx = context.extract(slider, pos);
-				slider = (slider << 1) | bit;
-				auto& model = gsl::at(models, idx);
-				const auto rwidth = rbound - lbound;
-				auto split = uint128_adj(rwidth, model.ones, model.total);
-				// Clamping to ensure we always predict nonzero probability for each symbol
-				// Of note: numbers in the range (split, split + 1) will never be generated and have no meaning
-				// Only way to fix this would be to make the intervals half-open, but that would probably mean making
-				// 0 an illegal value.
-				split = split == rwidth ? split - 1 : split;
-				split = split == 0 ? split + 1 : split;
-				model.ones += bit;
-				++model.total;
+				encoder_state dummy_state {};
+				dummy_state.lbound = lbound;
+				dummy_state.rbound = rbound;
+				dummy_state.ctx = slider;
+				dummy_state.pos = pos;
+				dummy_state.ctx_mask = context.ctx_mask;
+				dummy_state.pos_mask = context.pos_mask;
+				dummy_state.models = models.data();
+				auto split = get_subrange(&dummy_state, bit);
+				slider = dummy_state.ctx;
 
 				// what happens when the range collapses hmmmmmmmmm
 				// I.e. what if the distribution predicts zero probability for 0?
