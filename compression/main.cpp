@@ -218,6 +218,16 @@ namespace compression {
 				will need to be zero-padded. This can be done by the head of the decompressed code.
 		*/
 
+		struct shared_state {
+			std::uint64_t lbound; // +0
+			std::uint64_t rbound; // +8
+			std::uint64_t ctx_mask; // +16
+			std::uint64_t pos_mask; // +24
+			std::uint64_t ctx; // +32
+			std::uint64_t pos; // +40
+			bit_model* models; // +48
+		};
+
 		class decoder {
 		public:
 			decoder() = default;
@@ -328,20 +338,14 @@ namespace compression {
 
 		// This is for assembly-language encoding
 		struct encoder_state {
-			std::uint64_t lbound; // +0
-			std::uint64_t rbound; // +8
-			std::uint64_t ctx_mask; // +16
-			std::uint64_t pos_mask; // +24
-			std::uint64_t ctx; // +32
-			std::uint64_t pos; // +40
-			std::uint64_t outbound; // +48
-			std::uint64_t n_outbound; // +56 Encoding shift-out MUST stop every time we get to the next 64-bit block
-			std::uint64_t n_trailing; // +64
-			bit_model* models; // +72
+			shared_state shared;
+			std::uint64_t outbound; // +56
+			std::uint64_t n_outbound; // +64 Encoding shift-out MUST stop every time we get to the next 64-bit block
+			std::uint64_t n_trailing; // +72
 			std::uint64_t* output_words; // +80
 		};
 
-		extern "C" std::uint64_t get_subrange(encoder_state* state, std::uint64_t bit);
+		extern "C" std::uint64_t get_subrange(shared_state* state, std::uint64_t bit);
 
 		// This desparately needs unit-testing
 		// And testing how closely the entropy estimation tracks the encoder (same final model states)
@@ -372,7 +376,7 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				encoder_state dummy_state {};
+				shared_state dummy_state {};
 				dummy_state.lbound = lbound;
 				dummy_state.rbound = rbound;
 				dummy_state.ctx = slider;
