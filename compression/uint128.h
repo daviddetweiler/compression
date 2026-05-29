@@ -77,6 +77,8 @@ namespace compression {
 		n.hi = q;
 	}
 
+	extern "C" std::uint64_t uint128_adj(std::uint64_t range_width, std::uint64_t n, std::uint64_t d);
+
 	inline void bit_or(uint128& dst, const uint128& src)
 	{
 		dst.lo |= src.lo;

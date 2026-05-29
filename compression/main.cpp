@@ -241,18 +241,14 @@ namespace compression {
 
 			void decode(std::uint64_t pos)
 			{
-				const auto idx = context.extract(slider, pos);
-				auto& model = gsl::at(models, idx);
-				const auto rwidth = rbound - lbound;
-				auto tmp = mul(rwidth, model.ones);
-				div(tmp, model.total); // Throw away the remainder for now
-				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
+				auto& model = gsl::at(models, context.extract(slider, pos));
+				const auto range_width = rbound - lbound;
+				auto split = uint128_adj(range_width, model.ones, model.total);
 				// Clamping to ensure we always predict nonzero probability for each symbol
-				split = split == rwidth ? split - 1 : split;
+				split = split == range_width ? split - 1 : split;
 				split = split == 0 ? split + 1 : split;
 
 				const auto divider = lbound + split;
-				// Window's bit-reversed, that's why it's acting weird
 				const auto bit = inbound < divider ? 1 : 0;
 				slider <<= 1;
 				slider |= bit;
@@ -260,8 +256,8 @@ namespace compression {
 				model.ones += bit;
 				++model.total;
 
-				lbound = bit ? lbound : lbound + split;
-				rbound = bit ? lbound + split : rbound;
+				lbound = bit ? lbound : divider;
+				rbound = bit ? divider : rbound;
 
 				while (true) {
 					if (!((lbound ^ rbound) >> 63)) {
@@ -364,9 +360,7 @@ namespace compression {
 				slider = (slider << 1) | bit;
 				auto& model = gsl::at(models, idx);
 				const auto rwidth = rbound - lbound;
-				auto tmp = mul(rwidth, model.ones);
-				div(tmp, model.total); // Throw away the remainder for now
-				auto split = tmp.hi; // Yes, the rounding is bad if the remainder was non-zero
+				auto split = uint128_adj(rwidth, model.ones, model.total);
 				// Clamping to ensure we always predict nonzero probability for each symbol
 				// Of note: numbers in the range (split, split + 1) will never be generated and have no meaning
 				// Only way to fix this would be to make the intervals half-open, but that would probably mean making
@@ -388,7 +382,7 @@ namespace compression {
 						lbound <<= 1;
 						rbound <<= 1;
 						for (auto i = 0ull; i < n_trailers; ++i)
-							wtr.emit(!ebit); // Bitwise not would thrash the upper bits
+							wtr.emit(~ebit & 0b1);
 
 						n_trailers = 0;
 					}
@@ -414,7 +408,21 @@ namespace compression {
 					++pos;
 				}
 
-				wtr.emit(rbound >> 63);
+				// Now that the valid range is actually [lbound, rbound), correct tail behavior demands that we simply
+				// flush the entire implied value of lbound This is correct, because all the bits that were actually
+				// locked when encoding up to the final bit have already been decided upon (dubious in the case of
+				// having implied bits)
+				const auto ebit = lbound >> 63;
+				wtr.emit(ebit);
+				for (auto i = 0ull; i < n_trailers; ++i)
+					wtr.emit(~ebit & 0b1);
+
+				n_trailers = 0;
+
+				lbound <<= 1;
+				for (auto i = 0ull; i < 63; ++i, lbound <<= 1)
+					wtr.emit(lbound >> 63);
+
 				wtr.flush();
 
 				return static_cast<double>(wtr.getpos()) / rdr.pos();
@@ -567,7 +575,8 @@ int main(int argc, char** argv)
 		const model_context ctx {0xffff, 0x7};
 		// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest
 		// N bits of context, are the most important.
-		// The surprising thing is that this is _still_ suboptimal for the case of kernel.bin, which benefits from 0x20ff, 0x3f
+		// The surprising thing is that this is _still_ suboptimal for the case of kernel.bin, which benefits from
+		// 0x20ff, 0x3f
 		encoder enc {blob, ctx, models, false};
 		std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
