@@ -567,6 +567,7 @@ int main(int argc, char** argv)
 		const model_context ctx {0xffff, 0x7};
 		// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest
 		// N bits of context, are the most important.
+		// The surprising thing is that this is _still_ suboptimal for the case of kernel.bin, which benefits from 0x20ff, 0x3f
 		encoder enc {blob, ctx, models, false};
 		std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
