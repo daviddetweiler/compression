@@ -241,7 +241,7 @@ namespace compression {
 
 			void decode(std::uint64_t pos)
 			{
-				if (pos == 68)
+				if (pos == 67)
 					__debugbreak();
 
 				const auto idx = context.extract(slider, pos);
@@ -269,12 +269,14 @@ namespace compression {
 				rbound = bit ? lbound + split : rbound;
 
 				while (true) {
+					Expects(inbound >= lbound && inbound <= rbound);
+
 					if (!((lbound ^ rbound) >> 63)) {
 						lbound <<= 1;
 						rbound <<= 1;
 						nextbit();
 					}
-					else if (lbound >> 62 == 0b01 && rbound >> 62 == 0b10) {
+					else if ((lbound >> 62) == 0b01 && (rbound >> 62) == 0b10) {
 						trace << pos << " prune" << std::endl;
 						lbound <<= 1;
 						lbound &= ~(1ull << 63);
@@ -283,11 +285,15 @@ namespace compression {
 
 						const auto hibit = inbound & (1ull << 63);
 						nextbit();
+						inbound &= ~(1ull << 63);
 						inbound |= hibit;
 					}
 					else {
 						break;
 					}
+
+					// I knew it. Bit 67, the bit before the traces diverge on bit 68
+					Ensures(inbound >= lbound && inbound <= rbound);
 				}
 			}
 
@@ -370,7 +376,7 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				if (pos == 68)
+				if (pos == 67)
 					__debugbreak();
 
 				const auto idx = context.extract(slider, pos);
@@ -409,7 +415,7 @@ namespace compression {
 
 						n_trailers = 0;
 					}
-					else if (lbound >> 62 == 0b01 && rbound >> 62 == 0b10) {
+					else if ((lbound >> 62) == 0b01 && (rbound >> 62) == 0b10) {
 						trace << pos << " prune" << std::endl;
 						// Congratulations, we have the 0b0111... 0b1000... case
 						lbound <<= 1;
