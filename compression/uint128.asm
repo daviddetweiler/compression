@@ -1,5 +1,4 @@
 PUBLIC uint128_adj
-PUBLIC get_subrange
 
 _TEXT SEGMENT
 ; uint128_adj(range_width, ones_count, total)
