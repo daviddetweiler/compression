@@ -1,8 +1,6 @@
 import sys
 from typing import List
 
-# FIXME: we still fail near the very tail of larger files, like the compression.exe binaries
-
 def load(filename: str) -> bytes:
     with open(filename, 'rb') as file:
         return file.read()

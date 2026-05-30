@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -15,6 +16,9 @@
 
 namespace compression {
 	namespace {
+		using clock = std::chrono::system_clock;
+		using seconds = std::chrono::duration<double>;
+
 		template <std::size_t a>
 		auto align(std::size_t n)
 		{
@@ -55,6 +59,8 @@ namespace compression {
 			}
 
 			std::uint64_t bits() const noexcept { return ctx_bits + _mm_popcnt_u64(pos_mask); }
+
+			auto get_masks() const { return std::make_pair(ctx_mask, pos_mask); }
 
 		private:
 			std::uint64_t ctx_mask;
@@ -473,6 +479,118 @@ namespace compression {
 			bitreader rdr {};
 		};
 
+		class asm_encoder {
+		public:
+			asm_encoder() = default;
+			asm_encoder(
+				gsl::span<const unsigned char> input,
+				const model_context& context,
+				gsl::span<bit_model> models,
+				bool dry_run) :
+				asm_encoder {}
+			{
+				if (!dry_run)
+					encoded.resize(input.size() + 8);
+
+				rdr = bitreader {input};
+				wtr = bitwriter {encoded};
+
+				const auto [ctx_mask, pos_mask] = context.get_masks();
+				state.ctx_mask = ctx_mask;
+				state.pos_mask = pos_mask;
+				state.models = models.data();
+				state.rbound = ~state.lbound;
+				for (auto& model : models) {
+					model.ones = 1;
+					model.total = 2;
+				}
+			}
+
+			// One bit only!
+			void encode(std::uint64_t bit)
+			{
+				const auto split = get_subrange(&state, bit);
+				// Clamping to ensure we always predict nonzero probability for each symbol
+				// Of note: numbers in the range (split, split + 1) will never be generated and have no meaning
+				// Only way to fix this would be to make the intervals half-open, but that would probably mean making
+				// 0 an illegal value.
+
+				// what happens when the range collapses hmmmmmmmmm
+				// I.e. what if the distribution predicts zero probability for 0?
+				state.lbound = bit ? state.lbound : state.lbound + split;
+				state.rbound = bit ? state.lbound + split : state.rbound;
+
+				while (true) {
+					if (!((state.lbound ^ state.rbound) >> 63)) {
+						const auto ebit = state.lbound >> 63;
+						wtr.emit(ebit);
+						state.lbound <<= 1;
+						state.rbound <<= 1;
+						for (auto i = 0ull; i < n_trailers; ++i)
+							wtr.emit(~ebit & 0b1);
+
+						n_trailers = 0;
+					}
+					else if ((state.lbound >> 62) == 0b01 && (state.rbound >> 62) == 0b10) {
+						// Congratulations, we have the 0b0111... 0b1000... case
+						state.lbound <<= 1;
+						state.lbound &= ~(1ull << 63);
+						state.rbound <<= 1;
+						state.rbound |= 1ull << 63;
+						++n_trailers;
+					}
+					else {
+						break;
+					}
+				}
+			}
+
+			double encode_all()
+			{
+				while (!rdr.is_end()) {
+					const auto bit = rdr.next();
+					encode(bit);
+					++state.pos;
+				}
+
+				// Now that the valid range is actually [lbound, rbound), correct tail behavior demands that we simply
+				// flush the entire implied value of lbound This is correct, because all the bits that were actually
+				// locked when encoding up to the final bit have already been decided upon (dubious in the case of
+				// having implied bits)
+				const auto ebit = state.lbound >> 63;
+				wtr.emit(ebit);
+				for (auto i = 0ull; i < n_trailers; ++i)
+					wtr.emit(~ebit & 0b1);
+
+				n_trailers = 0;
+
+				state.lbound <<= 1;
+				for (auto i = 0ull; i < 63; ++i, state.lbound <<= 1)
+					wtr.emit(state.lbound >> 63);
+
+				wtr.flush();
+
+				return static_cast<double>(wtr.getpos()) / rdr.pos();
+			}
+
+			void write(gsl::czstring filename)
+			{
+				std::ofstream file {filename, std::ofstream::binary};
+				file.exceptions(file.badbit | file.failbit);
+				const auto bytes = wtr.getpos() >> 3;
+				file.write(reinterpret_cast<const char*>(encoded.data()), bytes);
+			}
+
+			std::pair<gsl::span<const unsigned char>, std::uint64_t> out() { return {encoded, wtr.getpos()}; }
+
+		private:
+			shared_state state {};
+			std::vector<unsigned char> encoded {};
+			std::uint64_t n_trailers {};
+			bitwriter wtr {};
+			bitreader rdr {};
+		};
+
 		uint128 vary(std::mt19937& drbg, std::uniform_int_distribution<int>& bit_dist, const uint128& mask)
 		{
 			const auto bit = bit_dist(drbg);
@@ -509,6 +627,24 @@ namespace compression {
 			return value;
 		}
 
+		void run_worker(
+			gsl::span<std::pair<uint128, double>> assignment,
+			gsl::span<bit_model> root_span,
+			gsl::span<const unsigned char> data,
+			std::uint64_t actual_bits)
+		{
+			for (auto& [mask, score] : assignment) {
+				const model_context ctx {mask.lo, mask.hi};
+				const auto popcnt = ctx.bits();
+				if (popcnt <= maxbits) {
+					const auto model_span = root_span.subspan(0, 1ull << popcnt);
+					score = running_entropy(model_span, data, ctx) / actual_bits;
+				}
+				else
+					score = static_cast<double>(actual_bits) + 1.0;
+			}
+		}
+
 		std::uint64_t evolve_for(gsl::span<const unsigned char> data)
 		{
 			constexpr auto elites = 32;
@@ -538,34 +674,22 @@ namespace compression {
 			for (auto& model : models)
 				model.resize(1ull << maxbits);
 
-			const auto worker =
-				[actual_bits, data](gsl::span<std::pair<uint128, double>> assignment, gsl::span<bit_model> root_span) {
-					for (auto& [mask, score] : assignment) {
-						const model_context ctx {mask.lo, mask.hi};
-						const auto popcnt = ctx.bits();
-						if (popcnt <= maxbits) {
-							const auto model_span = root_span.subspan(0, 1ull << popcnt);
-							score = running_entropy(model_span, data, ctx) / actual_bits;
-						}
-						else
-							score = static_cast<double>(actual_bits) + 1.0;
-					}
-				};
-
 			std::vector<std::thread> workers {};
 			workers.reserve(n_cores);
 			for (auto i = 0; i < 512; ++i) {
+				const auto start = clock::now();
 				for (auto j = 0ull; j < n_cores; ++j) {
-					workers.emplace_back([&worker,
-										  model = gsl::span {gsl::at(models, j)},
-										  assignment = gsl::at(assignments, j)] { worker(assignment, model); });
+					const gsl::span model {gsl::at(models, j)};
+					const auto assignment = gsl::at(assignments, j);
+					workers.emplace_back(
+						[model, assignment, data, actual_bits] { run_worker(assignment, model, data, actual_bits); });
 				}
 
 				for (auto& thr : workers)
 					thr.join();
 
+				const auto time = std::chrono::duration_cast<seconds>(clock::now() - start);
 				workers.clear();
-
 				std::sort(pool.begin(), pool.end(), [](auto&& a, auto&& b) {
 					if (a.second < b.second)
 						return true;
@@ -578,11 +702,13 @@ namespace compression {
 
 				const auto& best = pool.front();
 				const auto logline = std::format(
-					"Generation {} best score {} (ctx: 0x{:x}, pos: 0x{:x})",
+					"Generation {} best score {} (ctx: 0x{:x}, pos: 0x{:x}) took {} ({} per trial)",
 					i,
 					best.second,
 					best.first.lo,
-					best.first.hi);
+					best.first.hi,
+					time,
+					time / pool.size());
 
 				std::cout << logline << std::endl;
 
@@ -629,8 +755,11 @@ int main(int argc, char** argv)
 		//  The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the
 		//  closest N bits of context, are the most important. The surprising thing is that this is _still_ suboptimal
 		//  for the case of kernel.bin, which benefits from 0x20ff, 0x3f
-		encoder enc {blob, ctx, models, false};
-		std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
+		asm_encoder enc {blob, ctx, models, false};
+		const auto start = clock::now();
+		const auto ratio = enc.encode_all();
+		const auto time = std::chrono::duration_cast<seconds>(clock::now() - start);
+		std::cout << std::format("Encoded: {}% ({})", 100.0 * ratio, time) << std::endl;
 
 		enc.write("tapeout.bin");
 		const auto [encoded, n_bits] = enc.out();

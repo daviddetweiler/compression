@@ -45,8 +45,6 @@ flush_bit_done:
 ; get_model(&state, bit)
 get_model:
 	mov rax, [rcx + 32]
-	shl qword ptr [rcx + 32], 1
-	or [rcx + 32], rdx
 	pext rax, rax, [rcx + 16]
 	mov r9, [rcx + 40]
 	pext r9, r9, [rcx + 24]
@@ -60,7 +58,7 @@ get_model:
 
 ; get_subrange(&state, bit)
 ; bit must be [0, 1]
-; this is an extremely unreadable way to extract 
+; this is an extremely unreadable way to compute the width of the subrange assigned to the next bit being 1
 get_subrange:
 	call get_model
 	mov r10, rax
@@ -69,8 +67,12 @@ get_subrange:
 	mov rax, [rcx + 48]
 	mov r9, [rax + r10 + 8]
 	mov r8, [rax + r10]
+
+	; Let's update the model and the context with the actual bit encoded
 	add [rax + r10], rdx
 	add qword ptr [rax + r10 + 8], 1
+	shl qword ptr [rcx + 32], 1
+	or [rcx + 32], rdx
 	
 	; context model has been updated, r8 and r9 are the ones and total count, respectively
 	mov r11, rdx
