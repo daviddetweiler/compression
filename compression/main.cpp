@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include <gsl/gsl>
@@ -509,27 +510,57 @@ namespace compression {
 			constexpr auto elites = 32;
 			constexpr auto relatives = 32;
 			static_assert(elites <= relatives, "you're biasing the distribution");
+			const auto n_cores = std::thread::hardware_concurrency();
 			std::mt19937 drbg {0xdeadbeef};
 			std::bernoulli_distribution coin {0.5};
 			std::uniform_int_distribution bit_dist {0, mask_width - 1};
 			std::vector<std::pair<uint128, double>> pool(elites * relatives);
+			gsl::span pool_span {pool};
+			std::vector<gsl::span<std::pair<uint128, double>>> assignments(n_cores);
+			std::vector<std::vector<bit_model>> models(n_cores);
+			const auto n_per_core = pool.size() / n_cores;
 			for (auto& gene : pool)
 				gene.first = draw(drbg);
 
+			auto assignment_idx = 0ull;
+			for (auto i = 0u; i < n_cores - 1; ++i) {
+				gsl::at(assignments, i) = pool_span.subspan(assignment_idx, n_per_core);
+				assignment_idx += n_per_core;
+			}
+
+			assignments.back() = pool_span.subspan(assignment_idx);
 			const auto actual_bits = data.size() * 8;
-			std::vector<bit_model> models(1ull << maxbits);
-			const gsl::span<bit_model> root_span {models};
-			for (auto i = 0; i < 512; ++i) {
-				for (auto& [mask, score] : pool) {
-					const model_context ctx {mask.lo, mask.hi};
-					const auto popcnt = ctx.bits();
-					if (popcnt <= maxbits) {
-						const auto model_span = root_span.subspan(0, 1ull << popcnt);
-						score = running_entropy(model_span, data, ctx) / actual_bits;
+
+			for (auto& model : models)
+				model.resize(1ull << maxbits);
+
+			const auto worker =
+				[actual_bits, data](gsl::span<std::pair<uint128, double>> assignment, gsl::span<bit_model> root_span) {
+					for (auto& [mask, score] : assignment) {
+						const model_context ctx {mask.lo, mask.hi};
+						const auto popcnt = ctx.bits();
+						if (popcnt <= maxbits) {
+							const auto model_span = root_span.subspan(0, 1ull << popcnt);
+							score = running_entropy(model_span, data, ctx) / actual_bits;
+						}
+						else
+							score = static_cast<double>(actual_bits) + 1.0;
 					}
-					else
-						score = static_cast<double>(actual_bits) + 1.0;
+				};
+
+			std::vector<std::thread> workers {};
+			workers.reserve(n_cores);
+			for (auto i = 0; i < 512; ++i) {
+				for (auto j = 0ull; j < n_cores; ++j) {
+					workers.emplace_back([&worker,
+										  model = gsl::span {gsl::at(models, j)},
+										  assignment = gsl::at(assignments, j)] { worker(assignment, model); });
 				}
+
+				for (auto& thr : workers)
+					thr.join();
+
+				workers.clear();
 
 				std::sort(pool.begin(), pool.end(), [](auto&& a, auto&& b) {
 					if (a.second < b.second)
@@ -589,11 +620,11 @@ int main(int argc, char** argv)
 
 	{
 		std::vector<bit_model> models(1 << 20);
-		const model_context ctx {0xffff, 0x7};
-		// The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the closest
-		// N bits of context, are the most important.
-		// The surprising thing is that this is _still_ suboptimal for the case of kernel.bin, which benefits from
-		// 0x20ff, 0x3f
+		const model_context ctx {0x80001fff, 0x80002f};
+		// const model_context ctx {0xffff, 0x7};
+		//  The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the
+		//  closest N bits of context, are the most important. The surprising thing is that this is _still_ suboptimal
+		//  for the case of kernel.bin, which benefits from 0x20ff, 0x3f
 		encoder enc {blob, ctx, models, false};
 		std::cout << "Encoded: " << 100.0 * enc.encode_all() << " %" << std::endl;
 
