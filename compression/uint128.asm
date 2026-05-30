@@ -1,99 +1,100 @@
-PUBLIC uint128_adj
+public uint128_adj
+public get_subrange
 
-_TEXT SEGMENT
+_text segment
 ; uint128_adj(range_width, ones_count, total)
 uint128_adj:
-	MOV RAX, RCX
-	MUL RDX
-	DIV R8
-	RET
+	mov rax, rcx
+	mul rdx
+	div r8
+	ret
 
 ; write_bit(&state, bit)
 write_bit:
-	SHL QWORD PTR [RCX+56], 1
-	OR [RCX+56], RDX
-	ADD QWORD PTR [RCX+64], 1
+	shl qword ptr [rcx + 56], 1
+	or [rcx + 56], rdx
+	add qword ptr [rcx + 64], 1
 
-	AND QWORD PTR [RCX+64], 63
-	JNZ write_bit_done
-	MOV RAX, [RCX+80]
-	MOV R8, [RCX+64]
-	MOV [RAX], R8
-	ADD QWORD PTR [RCX+80], 8
+	and qword ptr [rcx + 64], 63
+	jnz write_bit_done
+	mov rax, [rcx + 80]
+	mov r8, [rcx + 64]
+	mov [rax], r8
+	add qword ptr [rcx + 80], 8
 
 write_bit_done:
-	RET
+	ret
 
 ; flush_bit(&state, bit)
 flush_bit:
-	CALL write_bit
-	NOT RDX
-	AND RDX, 1
+	call write_bit
+	not rdx
+	and rdx, 1
 
 flush_bit_again:
-	MOV RAX, [RCX+72]
-	TEST RAX, RAX
-	JZ flush_bit_done
-	CALL write_bit
-	SUB QWORD PTR [RCX+72], 1
-	JMP flush_bit_again
+	mov rax, [rcx + 72]
+	test rax, rax
+	jz flush_bit_done
+	call write_bit
+	sub qword ptr [rcx + 72], 1
+	jmp flush_bit_again
 
 flush_bit_done:
-	RET
+	ret
 
 ; get_model(&state, bit)
 get_model:
-	MOV RAX, [RCX+32]
-	SHL QWORD PTR [RCX+32], 1
-	OR [RCX+32], RDX
-	PEXT RAX, RAX, [RCX+16]
-	MOV R9, [RCX+40]
-	PEXT R9, R9, [RCX+24]
-	MOV R8, RCX
-	POPCNT RCX, [RCX+16]
-	SHL R9, CL
-	MOV RCX, R8
-	OR RAX, R9
-	SHL RAX, 4
-	RET
+	mov rax, [rcx + 32]
+	shl qword ptr [rcx + 32], 1
+	or [rcx + 32], rdx
+	pext rax, rax, [rcx + 16]
+	mov r9, [rcx + 40]
+	pext r9, r9, [rcx + 24]
+	mov r8, rcx
+	popcnt rcx, [rcx + 16]
+	shl r9, cl
+	mov rcx, r8
+	or rax, r9
+	shl rax, 4
+	ret
 
 ; get_subrange(&state, bit)
 ; bit must be [0, 1]
 ; this is an extremely unreadable way to extract 
 get_subrange:
-	CALL get_model
-	MOV R10, RAX
+	call get_model
+	mov r10, rax
 
-	; At this point, r10 contains the current context model offset in bytes
-	MOV RAX, [RCX+48]
-	MOV R9, [RAX+R10+8]
-	MOV R8, [RAX+R10]
-	ADD [RAX+R10], RDX
-	ADD QWORD PTR [RAX+R10+8], 1
+	; at this point, r10 contains the current context model offset in bytes
+	mov rax, [rcx + 48]
+	mov r9, [rax + r10 + 8]
+	mov r8, [rax + r10]
+	add [rax + r10], rdx
+	add qword ptr [rax + r10 + 8], 1
 	
-	; Context model has been updated, r8 and r9 are the ones and total count, respectively
-	MOV R11, RDX
-	MOV RAX, [RCX+8]
-	SUB RAX, [RCX]
-	MOV R10, RAX
-	MUL R8
-	DIV R9
-	MOV RDX, R11
+	; context model has been updated, r8 and r9 are the ones and total count, respectively
+	mov r11, rdx
+	mov rax, [rcx + 8]
+	sub rax, [rcx]
+	mov r10, rax
+	mul r8
+	div r9
+	mov rdx, r11
 
-	; RAX now contains the width of the ones range, while r10 has the original range width
-	TEST RAX, RAX
-	JNZ get_subrange_nzero
-	ADD RAX, 1
+	; rax now contains the width of the ones range, while r10 has the original range width
+	test rax, rax
+	jnz get_subrange_nzero
+	add rax, 1
 
 get_subrange_nzero:
-	CMP RAX, R10
-	JNE get_subrange_ok
-	SUB RAX, 1
+	cmp rax, r10
+	jne get_subrange_ok
+	sub rax, 1
 
 get_subrange_ok:
-	; Range has been clamped to ensure nonzero probability
-	RET
+	; range has been clamped to ensure nonzero probability
+	ret
 
-_TEXT ENDS	
+_text ends	
 
-END
+end
