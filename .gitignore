@@ -13,3 +13,4 @@
 *.csv
 /compression/compression.vcxproj.user
 *.diff
+*.log

@@ -1,5 +1,7 @@
 public uint128_adj
 public get_subrange
+public get_model
+public update_model
 
 _text segment
 ; uint128_adj(range_width, ones_count, total)
@@ -54,27 +56,18 @@ get_model:
 	mov rcx, r8
 	or rax, r9
 	shl rax, 4
+	add rax, [rcx + 48]
 	ret
 
-; get_subrange(&state, bit)
+; get_subrange(&state, bit, model)
 ; bit must be [0, 1]
 ; this is an extremely unreadable way to compute the width of the subrange assigned to the next bit being 1
 get_subrange:
-	call get_model
-	mov r10, rax
-
 	; at this point, r10 contains the current context model offset in bytes
-	mov rax, [rcx + 48]
-	mov r9, [rax + r10 + 8]
-	mov r8, [rax + r10]
-
-	; Let's update the model and the context with the actual bit encoded
-	add [rax + r10], rdx
-	add qword ptr [rax + r10 + 8], 1
-	shl qword ptr [rcx + 32], 1
-	or [rcx + 32], rdx
+	mov r9, [r8 + 8]
+	mov r8, [r8]
 	
-	; context model has been updated, r8 and r9 are the ones and total count, respectively
+	; context model has been loaded, r8 and r9 are the ones and total count, respectively
 	mov r11, rdx
 	mov rax, [rcx + 8]
 	sub rax, [rcx]
@@ -95,6 +88,15 @@ get_subrange_nzero:
 
 get_subrange_ok:
 	; range has been clamped to ensure nonzero probability
+	ret
+
+; update_model(&state, bit, model)
+update_model:
+	; Let's update the model and the context with the actual bit encoded
+	add [r8], rdx
+	add qword ptr [r8 + 8], 1
+	shl qword ptr [rcx + 32], 1
+	or [rcx + 32], rdx
 	ret
 
 _text ends	

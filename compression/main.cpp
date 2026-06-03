@@ -353,7 +353,9 @@ namespace compression {
 			std::uint64_t* output_words; // +80
 		};
 
-		extern "C" std::uint64_t get_subrange(shared_state* state, std::uint64_t bit);
+		extern "C" bit_model* get_model(shared_state* state, std::uint64_t bit);
+		extern "C" std::uint64_t get_subrange(shared_state* state, std::uint64_t bit, bit_model* model);
+		extern "C" void update_model(shared_state* state, std::uint64_t bit, bit_model* model);
 
 		// This desparately needs unit-testing
 		// And testing how closely the entropy estimation tracks the encoder (same final model states)
@@ -509,7 +511,9 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				const auto split = get_subrange(&state, bit);
+				const auto model = get_model(&state, bit);
+				const auto split = get_subrange(&state, bit, model);
+				update_model(&state, bit, model);
 				// Clamping to ensure we always predict nonzero probability for each symbol
 				// Of note: numbers in the range (split, split + 1) will never be generated and have no meaning
 				// Only way to fix this would be to make the intervals half-open, but that would probably mean making
@@ -588,6 +592,103 @@ namespace compression {
 			std::vector<unsigned char> encoded {};
 			std::uint64_t n_trailers {};
 			bitwriter wtr {};
+			bitreader rdr {};
+		};
+
+		class asm_decoder {
+		public:
+			asm_decoder() = default;
+			asm_decoder(
+				gsl::span<const unsigned char> input,
+				const model_context& context,
+				gsl::span<bit_model> models,
+				std::uint64_t expected) :
+				asm_decoder {}
+			{
+				rdr = bitreader {input};
+				const auto [ctx_mask, pos_mask] = context.get_masks();
+				state.ctx_mask = ctx_mask;
+				state.pos_mask = pos_mask;
+				state.rbound = ~state.lbound;
+				state.models = models.data();
+				decoded.resize(expected);
+				for (auto& model : models) {
+					model.ones = 1;
+					model.total = 2;
+				}
+			}
+
+			void decode()
+			{
+				const auto model = get_model(&state, 0);
+				const auto split = get_subrange(&state, 0, model);
+				const auto divider = state.lbound + split;
+				const auto bit = inbound < divider ? 1 : 0;
+				update_model(&state, bit, model);
+
+				state.lbound = bit ? state.lbound : divider;
+				state.rbound = bit ? divider : state.rbound;
+
+				while (true) {
+					if (!((state.lbound ^ state.rbound) >> 63)) {
+						state.lbound <<= 1;
+						state.rbound <<= 1;
+						nextbit();
+					}
+					else if ((state.lbound >> 62) == 0b01 && (state.rbound >> 62) == 0b10) {
+						state.lbound <<= 1;
+						state.lbound &= ~(1ull << 63);
+						state.rbound <<= 1;
+						state.rbound |= 1ull << 63;
+
+						const auto hibit = inbound & (1ull << 63);
+						nextbit();
+						inbound &= ~(1ull << 63);
+						inbound |= hibit;
+					}
+					else {
+						break;
+					}
+				}
+			}
+
+			void nextbit()
+			{
+				inbound <<= 1;
+				inbound |= rdr.next();
+				++n_inbound;
+			}
+
+			void decode_all(std::uint64_t, std::uint64_t expected_bits)
+			{
+				for (auto i = 0; i < 64; ++i)
+					nextbit();
+
+				const gsl::span root_span {decoded};
+				while (state.pos < expected_bits) {
+					decode();
+					++state.pos;
+					if (!(state.pos & 63)) {
+						const auto wordpos = (state.pos >> 6) - 1;
+						const auto target = root_span.subspan(wordpos << 3, sizeof(state.ctx));
+						std::memcpy(target.data(), &state.ctx, sizeof(state.ctx));
+					}
+				}
+			}
+
+			void write(gsl::czstring filename, std::size_t actual_size)
+			{
+				std::ofstream file {filename, std::ofstream::binary};
+				file.exceptions(file.badbit | file.failbit);
+				const auto valid_bytes = gsl::span {decoded}.subspan(0, actual_size);
+				file.write(reinterpret_cast<const char*>(valid_bytes.data()), valid_bytes.size());
+			}
+
+		private:
+			shared_state state {};
+			std::uint64_t inbound {};
+			std::uint64_t n_inbound {};
+			std::vector<unsigned char> decoded {};
 			bitreader rdr {};
 		};
 
@@ -750,7 +851,9 @@ int main(int argc, char** argv)
 
 	{
 		std::vector<bit_model> models(1 << 20);
-		const model_context ctx {0x80001fff, 0x80002f};
+
+		const model_context ctx {0xbff, 0x60007};
+		// const model_context ctx {0x20ff, 0x3f};
 		// const model_context ctx {0xffff, 0x7};
 		//  The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the
 		//  closest N bits of context, are the most important. The surprising thing is that this is _still_ suboptimal
@@ -764,7 +867,7 @@ int main(int argc, char** argv)
 		enc.write("tapeout.bin");
 		const auto [encoded, n_bits] = enc.out();
 
-		decoder dec {encoded, ctx, models, blob.size()};
+		asm_decoder dec {encoded, ctx, models, blob.size()};
 		dec.decode_all(n_bits, blob.size() << 3);
 		dec.write("tapeout-rt.bin", raw_size);
 	}
