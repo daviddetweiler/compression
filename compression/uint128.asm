@@ -44,7 +44,7 @@ flush_bit_again:
 flush_bit_done:
 	ret
 
-; get_model(&state, bit)
+; get_model(&state)
 get_model:
 	mov rax, [rcx + 32]
 	pext rax, rax, [rcx + 16]
@@ -59,18 +59,19 @@ get_model:
 	add rax, [rcx + 48]
 	ret
 
-; get_subrange(&state, bit, model)
+; get_subrange(&state, model)
 ; bit must be [0, 1]
 ; this is an extremely unreadable way to compute the width of the subrange assigned to the next bit being 1
 get_subrange:
 	; at this point, r10 contains the current context model offset in bytes
-	mov r9, [r8 + 8]
-	mov r8, [r8]
+	mov r9, [rdx + 8]
+	mov r8, [rdx]
 	
 	; context model has been loaded, r8 and r9 are the ones and total count, respectively
 	mov r11, rdx
 	mov rax, [rcx + 8]
 	sub rax, [rcx]
+	mov r10, rax
 	mov r10, rax
 	mul r8
 	div r9
@@ -90,13 +91,13 @@ get_subrange_ok:
 	; range has been clamped to ensure nonzero probability
 	ret
 
-; update_model(&state, bit, model)
+; update_model(&state, model, bit)
 update_model:
 	; Let's update the model and the context with the actual bit encoded
-	add [r8], rdx
-	add qword ptr [r8 + 8], 1
+	add [rdx], r8
+	add qword ptr [rdx + 8], 1
 	shl qword ptr [rcx + 32], 1
-	or [rcx + 32], rdx
+	or [rcx + 32], r8
 	ret
 
 _text ends	

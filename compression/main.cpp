@@ -353,9 +353,9 @@ namespace compression {
 			std::uint64_t* output_words; // +80
 		};
 
-		extern "C" bit_model* get_model(shared_state* state, std::uint64_t bit);
-		extern "C" std::uint64_t get_subrange(shared_state* state, std::uint64_t bit, bit_model* model);
-		extern "C" void update_model(shared_state* state, std::uint64_t bit, bit_model* model);
+		extern "C" bit_model* get_model(shared_state* state);
+		extern "C" std::uint64_t get_subrange(shared_state* state, bit_model* model);
+		extern "C" void update_model(shared_state* state, bit_model* model, std::uint64_t bit);
 
 		// This desparately needs unit-testing
 		// And testing how closely the entropy estimation tracks the encoder (same final model states)
@@ -511,9 +511,9 @@ namespace compression {
 			// One bit only!
 			void encode(std::uint64_t bit)
 			{
-				const auto model = get_model(&state, bit);
-				const auto split = get_subrange(&state, bit, model);
-				update_model(&state, bit, model);
+				const auto model = get_model(&state);
+				const auto split = get_subrange(&state, model);
+				update_model(&state, model, bit);
 				// Clamping to ensure we always predict nonzero probability for each symbol
 				// Of note: numbers in the range (split, split + 1) will never be generated and have no meaning
 				// Only way to fix this would be to make the intervals half-open, but that would probably mean making
@@ -620,11 +620,11 @@ namespace compression {
 
 			void decode()
 			{
-				const auto model = get_model(&state, 0);
-				const auto split = get_subrange(&state, 0, model);
+				const auto model = get_model(&state);
+				const auto split = get_subrange(&state, model);
 				const auto divider = state.lbound + split;
 				const auto bit = inbound < divider ? 1 : 0;
-				update_model(&state, bit, model);
+				update_model(&state, model, bit);
 
 				state.lbound = bit ? state.lbound : divider;
 				state.rbound = bit ? divider : state.rbound;
