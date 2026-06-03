@@ -178,33 +178,75 @@ namespace compression {
 			return -bits;
 		}
 
-		double
-		running_entropy(gsl::span<bit_model> dist, gsl::span<const unsigned char> bytes, const model_context& ctx)
+		constexpr auto queue_len = 16;
+
+		// Use a ring buffer to keep a prefetch queue of (model_ptr, bit) pairs
+		// Have the first N loops only issue prefetches, and the last N loops only do computation
+		template <bool update_model>
+		double entropy(
+			gsl::span<bit_model> dist,
+			gsl::span<std::pair<std::conditional_t<update_model, bit_model*, const bit_model*>, std::uint64_t>> queue,
+			gsl::span<const unsigned char> bytes,
+			const model_context& ctx)
 		{
+			Expects(queue.size() == queue_len);
+
+			std::size_t head {};
+			std::size_t tail {};
+			const auto queue_cell = [queue](std::size_t idx) -> auto& { return gsl::at(queue, idx & (queue_len - 1)); };
+
 			bitreader rdr {bytes};
 			std::uint64_t window {};
 			std::uint64_t total {};
-			for (auto& model : dist) {
-				model.total = 2;
-				model.ones = 1;
+			if constexpr (update_model) {
+				for (auto& model : dist) {
+					model.total = 2;
+					model.ones = 1;
+				}
 			}
 
 			auto e_total = 0.0;
 			while (!rdr.is_end()) {
-				const auto idx = ctx.extract(window, total);
-				const auto bit = rdr.next();
-				auto& model = gsl::at(dist, idx);
-				e_total += bits_for_symbol(model, bit);
-				if (bit)
-					++model.ones;
+				{
+					const auto idx = ctx.extract(window, total);
+					const auto bit = rdr.next();
+					const auto model = &gsl::at(dist, idx);
+					_m_prefetchw(model);
+					queue_cell(head++) = std::make_pair(model, bit);
+					window <<= 1;
+					window |= bit;
+					++total;
+				}
 
-				++model.total;
-				window <<= 1;
-				window |= bit;
-				++total;
+				if (head - tail >= 64) {
+					const auto [model, bit] = queue_cell(tail++);
+					e_total += bits_for_symbol(*model, bit);
+					if constexpr (update_model) {
+						model->ones += bit;
+						++model->total;
+					}
+				}
 			}
 
 			return e_total;
+		}
+
+		double running_entropy(
+			gsl::span<bit_model> dist,
+			gsl::span<std::pair<bit_model*, std::uint64_t>> queue,
+			gsl::span<const unsigned char> bytes,
+			const model_context& ctx)
+		{
+			return entropy<true>(dist, queue, bytes, ctx);
+		}
+
+		double true_entropy(
+			gsl::span<bit_model> dist,
+			gsl::span<std::pair<const bit_model*, std::uint64_t>> queue,
+			gsl::span<const unsigned char> bytes,
+			const model_context& ctx)
+		{
+			return entropy<false>(dist, queue, bytes, ctx);
 		}
 
 		/*
@@ -730,6 +772,7 @@ namespace compression {
 
 		void run_worker(
 			gsl::span<std::pair<uint128, double>> assignment,
+			gsl::span<std::pair<bit_model*, std::uint64_t>> queue,
 			gsl::span<bit_model> root_span,
 			gsl::span<const unsigned char> data,
 			std::uint64_t actual_bits)
@@ -739,7 +782,7 @@ namespace compression {
 				const auto popcnt = ctx.bits();
 				if (popcnt <= maxbits) {
 					const auto model_span = root_span.subspan(0, 1ull << popcnt);
-					score = running_entropy(model_span, data, ctx) / actual_bits;
+					score = running_entropy(model_span, queue, data, ctx) / actual_bits;
 				}
 				else
 					score = static_cast<double>(actual_bits) + 1.0;
@@ -758,6 +801,7 @@ namespace compression {
 			std::vector<std::pair<uint128, double>> pool(elites * relatives);
 			gsl::span pool_span {pool};
 			std::vector<gsl::span<std::pair<uint128, double>>> assignments(n_cores);
+			std::vector<std::pair<bit_model*, std::uint64_t>> queues(n_cores * queue_len);
 			std::vector<std::vector<bit_model>> models(n_cores);
 			const auto n_per_core = pool.size() / n_cores;
 			for (auto& gene : pool)
@@ -782,8 +826,10 @@ namespace compression {
 				for (auto j = 0ull; j < n_cores; ++j) {
 					const gsl::span model {gsl::at(models, j)};
 					const auto assignment = gsl::at(assignments, j);
-					workers.emplace_back(
-						[model, assignment, data, actual_bits] { run_worker(assignment, model, data, actual_bits); });
+					const auto queue = gsl::span {queues}.subspan(j * queue_len, queue_len);
+					workers.emplace_back([model, queue, assignment, data, actual_bits] {
+						run_worker(assignment, queue, model, data, actual_bits);
+					});
 				}
 
 				for (auto& thr : workers)
@@ -852,8 +898,9 @@ int main(int argc, char** argv)
 	{
 		std::vector<bit_model> models(1 << 20);
 
-		const model_context ctx {0xbff, 0x60007};
-		// const model_context ctx {0x20ff, 0x3f};
+		// const model_context ctx {0x80006fff, 0x37};
+		// const model_context ctx {0xbff, 0x60007};
+		const model_context ctx {0x1fff, 0x1c000f};
 		// const model_context ctx {0xffff, 0x7};
 		//  The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the
 		//  closest N bits of context, are the most important. The surprising thing is that this is _still_ suboptimal
@@ -862,7 +909,12 @@ int main(int argc, char** argv)
 		const auto start = clock::now();
 		const auto ratio = enc.encode_all();
 		const auto time = std::chrono::duration_cast<seconds>(clock::now() - start);
+		std::vector<std::pair<const bit_model*, std::uint64_t>> queue(queue_len);
+		const auto entropy_content = true_entropy(models, queue, blob, ctx);
+		const auto true_ratio = entropy_content / (blob.size() * 8);
 		std::cout << std::format("Encoded: {}% ({})", 100.0 * ratio, time) << std::endl;
+		std::cout << std::format("True ratio: {}%", 100.0 * true_ratio) << std::endl;
+		std::cout << std::format("Adaptation penalty: {}%", 100.0 * ratio / true_ratio) << std::endl;
 
 		enc.write("tapeout.bin");
 		const auto [encoded, n_bits] = enc.out();

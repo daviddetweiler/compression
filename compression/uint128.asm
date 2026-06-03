@@ -72,7 +72,6 @@ get_subrange:
 	mov rax, [rcx + 8]
 	sub rax, [rcx]
 	mov r10, rax
-	mov r10, rax
 	mul r8
 	div r9
 	mov rdx, r11
