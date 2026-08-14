@@ -897,14 +897,7 @@ int main(int argc, char** argv)
 
 	{
 		std::vector<bit_model> models(1 << 20);
-
-		// const model_context ctx {0x80006fff, 0x37};
-		// const model_context ctx {0xbff, 0x60007};
-		const model_context ctx {0x1fff, 0x1c000f};
-		// const model_context ctx {0xffff, 0x7};
-		//  The general pattern from all the evolutionary stuff is that the lower 3 bits of the position, and the
-		//  closest N bits of context, are the most important. The surprising thing is that this is _still_ suboptimal
-		//  for the case of kernel.bin, which benefits from 0x20ff, 0x3f
+		const model_context ctx {0x1ffff, 0x7};
 		asm_encoder enc {blob, ctx, models, false};
 		const auto start = clock::now();
 		const auto ratio = enc.encode_all();
